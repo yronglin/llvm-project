@@ -170,6 +170,10 @@ private:
     /// When Kind == EK_Member, whether this is the initial initialization
     /// check for a default member initializer.
     bool IsDefaultMemberInit;
+
+    /// When Kind == EK_Variable, whether this is an implicit C++ for-range-initializer
+    /// variable. These can perform lifetime-extent
+    bool IsCXXForRangeVariable;
   };
 
   struct C {
@@ -253,6 +257,12 @@ public:
   /// Create the initialization entity for a variable.
   static InitializedEntity InitializeVariable(VarDecl *Var) {
     return InitializedEntity(Var);
+  }
+
+  static InitializedEntity InitializeCXXForRangeVariable(VarDecl *Var) {
+    InitializedEntity Result(Var);
+    Result.Variable.IsCXXForRangeVariable = true;
+    return Result;
   }
 
   /// Create the initialization entity for a parameter.
@@ -515,6 +525,11 @@ public:
   /// the class definition)?
   bool isDefaultMemberInitializer() const {
     return getKind() == EK_Member && Variable.IsDefaultMemberInit;
+  }
+
+  /// Is this the implicit C++ for-range-initializer variable.
+  bool isCXXForRangeVariableInitializer() const {
+    return getKind() == EK_Variable && Variable.IsCXXForRangeVariable;
   }
 
   /// Determine the location of the 'return' keyword when initializing

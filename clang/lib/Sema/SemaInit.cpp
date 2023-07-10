@@ -7349,12 +7349,12 @@ static bool pathContainsInit(IndirectLocalPath &Path) {
 static void visitLocalsRetainedByInitializer(IndirectLocalPath &Path,
                                              Expr *Init, LocalVisitor Visit,
                                              bool RevisitSubinits,
-                                             bool EnableLifetimeWarnings);
+                                             bool EnableLifetimeWarnings, bool isCXXForRangeVariable = false);
 
 static void visitLocalsRetainedByReferenceBinding(IndirectLocalPath &Path,
                                                   Expr *Init, ReferenceKind RK,
                                                   LocalVisitor Visit,
-                                                  bool EnableLifetimeWarnings);
+                                                  bool EnableLifetimeWarnings, bool isCXXForRangeVariable = false);
 
 template <typename T> static bool isRecordWithAttr(QualType Type) {
   if (auto *RD = Type->getAsCXXRecordDecl())
@@ -7534,7 +7534,7 @@ static bool implicitObjectParamIsLifetimeBound(const FunctionDecl *FD) {
 }
 
 static void visitLifetimeBoundArguments(IndirectLocalPath &Path, Expr *Call,
-                                        LocalVisitor Visit) {
+                                        LocalVisitor Visit, bool isCXXForRangeVariable = false) {
   const FunctionDecl *Callee;
   ArrayRef<Expr*> Args;
 
@@ -7575,7 +7575,7 @@ static void visitLifetimeBoundArguments(IndirectLocalPath &Path, Expr *Call,
   for (unsigned I = 0,
                 N = std::min<unsigned>(Callee->getNumParams(), Args.size());
        I != N; ++I) {
-    if (Callee->getParamDecl(I)->hasAttr<LifetimeBoundAttr>())
+    if (Callee->getParamDecl(I)->hasAttr<LifetimeBoundAttr>() || isCXXForRangeVariable)
       VisitLifetimeBoundArg(Callee->getParamDecl(I), Args[I]);
   }
 }
@@ -7585,7 +7585,7 @@ static void visitLifetimeBoundArguments(IndirectLocalPath &Path, Expr *Call,
 static void visitLocalsRetainedByReferenceBinding(IndirectLocalPath &Path,
                                                   Expr *Init, ReferenceKind RK,
                                                   LocalVisitor Visit,
-                                                  bool EnableLifetimeWarnings) {
+                                                  bool EnableLifetimeWarnings, bool isCXXForRangeVariable) {
   RevertToOldSizeRAII RAII(Path);
 
   // Walk past any constructs which we can lifetime-extend across.
@@ -7644,7 +7644,7 @@ static void visitLocalsRetainedByReferenceBinding(IndirectLocalPath &Path,
   if (isa<CallExpr>(Init)) {
     if (EnableLifetimeWarnings)
       handleGslAnnotatedTypes(Path, Init, Visit);
-    return visitLifetimeBoundArguments(Path, Init, Visit);
+    return visitLifetimeBoundArguments(Path, Init, Visit, isCXXForRangeVariable);
   }
 
   switch (Init->getStmtClass()) {
@@ -7713,7 +7713,7 @@ static void visitLocalsRetainedByReferenceBinding(IndirectLocalPath &Path,
 static void visitLocalsRetainedByInitializer(IndirectLocalPath &Path,
                                              Expr *Init, LocalVisitor Visit,
                                              bool RevisitSubinits,
-                                             bool EnableLifetimeWarnings) {
+                                             bool EnableLifetimeWarnings, bool isCXXForRangeVariable) {
   RevertToOldSizeRAII RAII(Path);
 
   Expr *Old;
@@ -8072,6 +8072,13 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
 
     auto *MTE = dyn_cast<MaterializeTemporaryExpr>(L);
 
+    if (MTE && ExtendingEntity->isCXXForRangeVariableInitializer()) {
+      llvm::errs() << llvm::raw_ostream::RED << "Oh, shit, extending lifetime" << llvm::raw_ostream::RESET << "\n";
+      Init->dumpColor();
+      MTE->setExtendingDecl(ExtendingEntity->getDecl(), ExtendingEntity->allocateManglingNumber());
+      return true;
+    }
+
     bool IsGslPtrInitWithGslTempOwner = false;
     bool IsLocalGslOwner = false;
     if (pathOnlyInitializesGslPointer(Path)) {
@@ -8118,6 +8125,8 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
       case PathLifetimeKind::Extend:
         // Update the storage duration of the materialized temporary.
         // FIXME: Rebuild the expression instead of mutating it.
+        llvm::errs() << llvm::raw_ostream::RED << "Oh, shit, extending lifetime" << llvm::raw_ostream::RESET << "\n";
+        Init->dumpColor();
         MTE->setExtendingDecl(ExtendingEntity->getDecl(),
                               ExtendingEntity->allocateManglingNumber());
         // Also visit the temporaries lifetime-extended by this initializer.
@@ -8321,10 +8330,10 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
   if (Init->isGLValue())
     visitLocalsRetainedByReferenceBinding(Path, Init, RK_ReferenceBinding,
                                           TemporaryVisitor,
-                                          EnableLifetimeWarnings);
+                                          EnableLifetimeWarnings, Entity.isCXXForRangeVariableInitializer());
   else
     visitLocalsRetainedByInitializer(Path, Init, TemporaryVisitor, false,
-                                     EnableLifetimeWarnings);
+                                     EnableLifetimeWarnings, Entity.isCXXForRangeVariableInitializer());
 }
 
 static void DiagnoseNarrowingInInitList(Sema &S,

@@ -1338,6 +1338,8 @@ public:
 
     bool IsCurrentlyCheckingDefaultArgumentOrInitializer = false;
 
+    bool IsCXXForRangeVariable = false;
+
     // When evaluating immediate functions in the initializer of a default
     // argument or default member initializer, this is the declaration whose
     // default initializer is being evaluated and the location of the call
@@ -9375,6 +9377,8 @@ public:
 
       /// We are building deduction guides for a class.
       BuildingDeductionGuides,
+
+      BuiltingCXXForRangeVariable
     } Kind;
 
     /// Was the enclosing context a non-instantiation SFINAE context?

@@ -405,6 +405,7 @@ bool Sema::CodeSynthesisContext::isInstantiationRecord() const {
   case BuildingBuiltinDumpStructCall:
   case LambdaExpressionSubstitution:
   case BuildingDeductionGuides:
+  case BuiltingCXXForRangeVariable:
     return false;
 
   // This function should never be called when Kind's value is Memoization.
@@ -1004,7 +1005,12 @@ void Sema::PrintInstantiationStack() {
           << convertCallArgsToString(
                  *this, llvm::ArrayRef(Active->CallArgs, Active->NumCallArgs));
       break;
-
+    case CodeSynthesisContext::BuiltingCXXForRangeVariable:
+      Diags.Report(Active->PointOfInstantiation,
+                   diag::note_building_builtin_dump_struct_call)
+          << convertCallArgsToString(
+                 *this, llvm::ArrayRef(Active->CallArgs, Active->NumCallArgs));
+      break;
     case CodeSynthesisContext::Memoization:
       break;
 
@@ -1060,7 +1066,7 @@ void Sema::PrintInstantiationStack() {
           << Active->InstantiationRange;
       break;
     case CodeSynthesisContext::BuildingDeductionGuides:
-      llvm_unreachable("unexpected deduction guide in instantiation stack");
+      llvm_unreachable("unexpected deduction guide in instantiation stack");      
     }
   }
 }
@@ -1133,6 +1139,7 @@ std::optional<TemplateDeductionInfo *> Sema::isSFINAEContext() const {
     case CodeSynthesisContext::MarkingClassDllexported:
     case CodeSynthesisContext::BuildingBuiltinDumpStructCall:
     case CodeSynthesisContext::BuildingDeductionGuides:
+    case CodeSynthesisContext::BuiltingCXXForRangeVariable:
       // This happens in a context unrelated to template instantiation, so
       // there is no SFINAE.
       return std::nullopt;

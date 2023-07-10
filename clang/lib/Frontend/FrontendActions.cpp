@@ -414,6 +414,8 @@ private:
       return "BuildingBuiltinDumpStructCall";
     case CodeSynthesisContext::BuildingDeductionGuides:
       return "BuildingDeductionGuides";
+    case CodeSynthesisContext::BuiltingCXXForRangeVariable:
+      return "BuiltingCXXForRangeVariable";
     }
     return "";
   }

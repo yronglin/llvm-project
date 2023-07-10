@@ -2033,11 +2033,16 @@ StmtResult Parser::ParseForStatement(SourceLocation *TrailingElseLoc) {
     MaybeParseCXX11Attributes(attrs);
 
     ForRangeInfo.ColonLoc = ConsumeToken();
+
+    Sema::CodeSynthesisContext Ctx;
+    Ctx.Kind = Sema::CodeSynthesisContext::BuiltingCXXForRangeVariable;
+    Ctx.PointOfInstantiation = ForLoc;
+    Actions.pushCodeSynthesisContext(Ctx);
+
     if (Tok.is(tok::l_brace))
       ForRangeInfo.RangeExpr = ParseBraceInitializer();
     else
       ForRangeInfo.RangeExpr = ParseExpression();
-
     Diag(Loc, diag::err_for_range_identifier)
       << ((getLangOpts().CPlusPlus11 && !getLangOpts().CPlusPlus17)
               ? FixItHint::CreateInsertion(Loc, "auto &&")
@@ -2045,6 +2050,8 @@ StmtResult Parser::ParseForStatement(SourceLocation *TrailingElseLoc) {
 
     ForRangeInfo.LoopVar =
         Actions.ActOnCXXForRangeIdentifier(getCurScope(), Loc, Name, attrs);
+    Actions.popCodeSynthesisContext();
+
   } else if (isForInitDeclaration()) {  // for (int X = 4;
     ParenBraceBracketBalancer BalancerRAIIObj(*this);
 
@@ -2238,11 +2245,16 @@ StmtResult Parser::ParseForStatement(SourceLocation *TrailingElseLoc) {
   if (ForRangeInfo.ParsedForRangeDecl()) {
     ExprResult CorrectedRange =
         Actions.CorrectDelayedTyposInExpr(ForRangeInfo.RangeExpr.get());
+    // Register a note to explain why we're performing the call.
+    Sema::CodeSynthesisContext Ctx;
+    Ctx.Kind = Sema::CodeSynthesisContext::BuiltingCXXForRangeVariable;
+    Ctx.PointOfInstantiation = ForLoc;
+    Actions.pushCodeSynthesisContext(Ctx);
     ForRangeStmt = Actions.ActOnCXXForRangeStmt(
         getCurScope(), ForLoc, CoawaitLoc, FirstPart.get(),
         ForRangeInfo.LoopVar.get(), ForRangeInfo.ColonLoc, CorrectedRange.get(),
         T.getCloseLocation(), Sema::BFRK_Build);
-
+    Actions.popCodeSynthesisContext();    
   // Similarly, we need to do the semantic analysis for a for-range
   // statement immediately in order to close over temporaries correctly.
   } else if (ForEach) {

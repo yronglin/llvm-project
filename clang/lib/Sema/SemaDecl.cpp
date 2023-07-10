@@ -13296,7 +13296,13 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init, bool DirectInit) {
   ParenListExpr *CXXDirectInit = dyn_cast<ParenListExpr>(Init);
   bool IsParenListInit = false;
   if (!VDecl->isInvalidDecl()) {
-    InitializedEntity Entity = InitializedEntity::InitializeVariable(VDecl);
+
+    InitializedEntity Entity =
+        !CodeSynthesisContexts.empty() &&
+                CodeSynthesisContexts.back().Kind ==
+                    CodeSynthesisContext::BuiltingCXXForRangeVariable
+            ? InitializedEntity::InitializeCXXForRangeVariable(VDecl)
+            : InitializedEntity::InitializeVariable(VDecl);
     InitializationKind Kind = InitializationKind::CreateForInit(
         VDecl->getLocation(), DirectInit, Init);
 

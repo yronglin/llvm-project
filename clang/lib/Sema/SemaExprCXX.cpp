@@ -7189,6 +7189,11 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
 ExprResult Sema::MaybeBindToTemporary(Expr *E) {
   if (!E)
     return ExprError();
+  
+  if (!CodeSynthesisContexts.empty() && CodeSynthesisContexts.back().Kind == CodeSynthesisContext::BuiltingCXXForRangeVariable) {
+    abort();
+    return TemporaryMaterializationConversion(E);
+  }
 
   assert(!isa<CXXBindTemporaryExpr>(E) && "Double-bound temporary?");
 
@@ -7346,6 +7351,7 @@ ExprResult Sema::MaybeBindToTemporary(Expr *E) {
   if (IsDecltype)
     ExprEvalContexts.back().DelayedDecltypeBinds.push_back(Bind);
 
+  // return TemporaryMaterializationConversion(Bind);
   return Bind;
 }
 
