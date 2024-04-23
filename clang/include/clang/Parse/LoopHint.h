@@ -10,6 +10,7 @@
 #define LLVM_CLANG_PARSE_LOOPHINT_H
 
 #include "clang/Basic/SourceLocation.h"
+#include "clang/AST/Attr.h"
 
 namespace clang {
 

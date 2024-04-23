@@ -42,6 +42,33 @@ enum PragmaFPKind {
   PFK_Exceptions,  // #pragma clang fp exceptions
   PFK_EvalMethod   // #pragma clang fp eval_method
 };
-}
+
+enum PragmaLoopHintKind {
+  PLHK_clang_loop_vectorize,                       // #pragma clang loop vectorize
+  PLHK_clang_loop_vectorize_width,                 // #pragma clang loop vectorize_width
+  PLHK_clang_loop_interleave,                      // #pragma clang loop interleave
+  PLHK_clang_loop_vectorize_predicate,             // #pragma clang loop vectorize_predicate
+  PLHK_clang_loop_interleave_count,                // #pragma clang loop interleave_count
+  PLHK_clang_loop_unroll,                          // #pragma clang loop unroll
+  PLHK_clang_loop_unroll_count,                    // #pragma clang loop unroll_count
+  PLHK_clang_loop_pipeline,                        // #pragma clang loop pipeline
+  PLHK_clang_loop_pipeline_initiation_interval,    // #pragma clang loop pipeline_initiation_interval
+  PLHK_clang_loop_distribute,                      // #pragma clang loop distribute
+  PLHK_unroll,                                     // #pragma unroll
+  PLHK_nounroll,                                   // #pragma nounroll
+  PLHK_unroll_and_jam,                             // #pragma unroll_and_jam
+  PLHK_nounroll_and_jam                             // #pragma nounroll_and_jam
+};
+
+enum PragmaLoopHintStateKind {
+  PLHSK_enable,
+  PLHSK_disable,
+  PLHSK_numeric,
+  PLHSK_fixed_width,
+  PLHSK_scalable_width,
+  PLHSK_assume_safety,
+  PLHSK_full
+};
+} // namespace clang
 
 #endif

@@ -1417,6 +1417,7 @@ bool Parser::HandlePragmaLoopHint(LoopHint &Hint) {
       static_cast<PragmaLoopHintInfo *>(Tok.getAnnotationValue());
 
   IdentifierInfo *PragmaNameInfo = Info->PragmaName.getIdentifierInfo();
+  PragmaLoopHintKind Kind = static_cast<PragmaLoopHintKind>(Info->Kind);
   Hint.PragmaNameLoc = IdentifierLoc::create(
       Actions.Context, Info->PragmaName.getLocation(), PragmaNameInfo);
 
@@ -1485,12 +1486,67 @@ bool Parser::HandlePragmaLoopHint(LoopHint &Hint) {
     ConsumeAnnotationToken();
     SourceLocation StateLoc = Toks[0].getLocation();
     IdentifierInfo *StateInfo = Toks[0].getIdentifierInfo();
+    StringRef State = StateInfo->getName();
+
+    switch (Kind) {
+    // #pragma vectorize({enable, disable, assume_safety})
+    // #pragma interleave({enable, disable, assume_safety})
+    case PLHK_clang_loop_vectorize:
+    case PLHK_clang_loop_interleave:
+      if (State != "disable" && State != "enable" && State != "assume_safety") {
+        Diag(Toks[0].getLocation(), diag::err_pragma_invalid_keyword)
+            << /*FullKeyword=*/false
+            << /*AssumeSafetyKeyword=*/true;
+        return false;
+      }
+      break;
+    // #pragma vectorize_predicate({enable, disable})
+    case PLHK_clang_loop_vectorize_predicate:
+      if (State != "disable" && State != "enable") {
+        Diag(Toks[0].getLocation(), diag::err_pragma_invalid_keyword)
+            << /*FullKeyword=*/false
+            << /*AssumeSafetyKeyword=*/false;
+        return false;
+      }
+      break;
+    // 'pipeline' '(' disable ')'
+    case PLHK_clang_loop_pipeline:
+      if (State != "disable") {
+        Diag(Toks[0].getLocation(), diag::err_pragma_pipeline_invalid_keyword);
+        return false;
+      }
+      break;
+    // 'unroll' '(' unroll-hint-keyword ')'
+    case PLHK_clang_loop_unroll:
+      if (State != "disable" && State != "enable" && State != "full") {
+        Diag(Toks[0].getLocation(), diag::err_pragma_invalid_keyword)
+            << /*FullKeyword=*/true
+            << /*AssumeSafetyKeyword=*/false;
+        return false;
+      }
+      break;
+    // 'vectorize_width' '(' loop-hint-value ')'
+    // 'interleave_count' '(' loop-hint-value ')'
+    // 'unroll_count' '(' loop-hint-value ')'
+    // 'pipeline_initiation_interval' '(' loop-hint-value ')'
+    case PLHK_clang_loop_vectorize_width:
+    case PLHK_clang_loop_interleave_count:
+    case PLHK_clang_loop_unroll_count:
+    case PLHK_clang_loop_pipeline_initiation_interval:
+      Diag(Toks[0].getLocation(), diag::err_pragma_invalid_keyword)
+          << /*FullKeyword=*/false
+          << /*AssumeSafetyKeyword=*/false;
+      return false;
+    default:
+      break;
+    }
+
 
     bool Valid = StateInfo &&
                  llvm::StringSwitch<bool>(StateInfo->getName())
                      .Case("disable", true)
                      .Case("enable", !OptionPipelineDisabled)
-                     .Case("full", OptionUnroll || OptionUnrollAndJam)
+                     .Case("full", OptionUnroll)
                      .Case("assume_safety", AssumeSafetyArg)
                      .Default(false);
     if (!Valid) {
@@ -1498,7 +1554,7 @@ bool Parser::HandlePragmaLoopHint(LoopHint &Hint) {
         Diag(Toks[0].getLocation(), diag::err_pragma_pipeline_invalid_keyword);
       } else {
         Diag(Toks[0].getLocation(), diag::err_pragma_invalid_keyword)
-            << /*FullKeyword=*/(OptionUnroll || OptionUnrollAndJam)
+            << /*FullKeyword=*/(OptionUnroll)
             << /*AssumeSafetyKeyword=*/AssumeSafetyArg;
       }
       return false;
@@ -3615,18 +3671,22 @@ void PragmaLoopHintHandler::HandlePragma(Preprocessor &PP,
     Token Option = Tok;
     IdentifierInfo *OptionInfo = Tok.getIdentifierInfo();
 
-    bool OptionValid = llvm::StringSwitch<bool>(OptionInfo->getName())
-                           .Case("vectorize", true)
-                           .Case("interleave", true)
-                           .Case("unroll", true)
-                           .Case("distribute", true)
-                           .Case("vectorize_predicate", true)
-                           .Case("vectorize_width", true)
-                           .Case("interleave_count", true)
-                           .Case("unroll_count", true)
-                           .Case("pipeline", true)
-                           .Case("pipeline_initiation_interval", true)
-                           .Default(false);
+    auto [OptionValid, Kind] =
+        llvm::StringSwitch<std::tuple<bool, PragmaLoopHintKind>>(
+            OptionInfo->getName())
+            .Case("vectorize", {true, PLHK_clang_loop_vectorize})
+            .Case("interleave", {true, PLHK_clang_loop_interleave})
+            .Case("unroll", {true, PLHK_clang_loop_unroll})
+            .Case("distribute", {true, PLHK_clang_loop_distribute})
+            .Case("vectorize_predicate",
+                  {true, PLHK_clang_loop_vectorize_predicate})
+            .Case("vectorize_width", {true, PLHK_clang_loop_vectorize_width})
+            .Case("interleave_count", {true, PLHK_clang_loop_interleave_count})
+            .Case("unroll_count", {true, PLHK_clang_loop_unroll_count})
+            .Case("pipeline", {true, PLHK_clang_loop_pipeline})
+            .Case("pipeline_initiation_interval",
+                  {true, PLHK_clang_loop_pipeline_initiation_interval})
+            .Default({false, /*invalid*/ PLHK_clang_loop_vectorize});
     if (!OptionValid) {
       PP.Diag(Tok.getLocation(), diag::err_pragma_loop_invalid_option)
           << /*MissingOption=*/false << OptionInfo;
@@ -3642,6 +3702,7 @@ void PragmaLoopHintHandler::HandlePragma(Preprocessor &PP,
     PP.Lex(Tok);
 
     auto *Info = new (PP.getPreprocessorAllocator()) PragmaLoopHintInfo;
+    Info->Kind = Kind;
     if (ParseLoopHintValue(PP, Tok, PragmaName, Option, /*ValueInParens=*/true,
                            *Info))
       return;
@@ -3698,6 +3759,17 @@ void PragmaUnrollHintHandler::HandlePragma(Preprocessor &PP,
   Token PragmaName = Tok;
   PP.Lex(Tok);
   auto *Info = new (PP.getPreprocessorAllocator()) PragmaLoopHintInfo;
+  if (PragmaName.getIdentifierInfo()->isStr("unroll"))
+    Info->Kind = PLHK_unroll;
+  else if (PragmaName.getIdentifierInfo()->isStr("nounroll"))
+    Info->Kind = PLHK_nounroll;
+  else if (PragmaName.getIdentifierInfo()->isStr("unroll_and_jam"))
+    Info->Kind = PLHK_unroll_and_jam;
+  else if (PragmaName.getIdentifierInfo()->isStr("nounroll_and_jam"))
+    Info->Kind = PLHK_nounroll_and_jam;
+  else
+    llvm_unreachable("invalid unroll hint");
+
   if (Tok.is(tok::eod)) {
     // nounroll or unroll pragma without an argument.
     Info->PragmaName = PragmaName;

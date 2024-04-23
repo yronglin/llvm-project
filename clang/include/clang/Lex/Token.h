@@ -344,6 +344,7 @@ struct PragmaLoopHintInfo {
   Token PragmaName;
   Token Option;
   ArrayRef<Token> Toks;
+  unsigned Kind;
 };
 } // end namespace clang
 
