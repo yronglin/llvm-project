@@ -6,10 +6,9 @@
 // RUN: %clang_cc1 -std=c++20 -emit-module-interface -fmodule-file=x=%t/x.pcm %t/x.y.cppm -o %t/x.y.pcm
 // RUN: %clang_cc1 -std=c++20 -emit-module-interface %t/a.b.cppm -o %t/a.b.pcm
 //
-// RUN: %clang_cc1 -std=c++20 -I%t -fmodule-file=x.y=%t/x.y.pcm -fmodule-file=x=%t/x.pcm -verify %t/test.cpp \
-// RUN:            -DMODULE_NAME=z -DINTERFACE
+// RUN: %clang_cc1 -std=c++20 -I%t -fmodule-file=x.y=%t/x.y.pcm -fmodule-file=x=%t/x.pcm -verify %t/test.cpp
 // RUN: %clang_cc1 -std=c++20 -I%t -fmodule-file=x.y=%t/x.y.pcm -fmodule-file=x=%t/x.pcm \
-// RUN:            -fmodule-file=a.b=%t/a.b.pcm -verify %t/test.cpp -DMODULE_NAME=a.b
+// RUN:            -fmodule-file=a.b=%t/a.b.pcm -verify %t/test.cpp
 // RUN: %clang_cc1 -std=c++20 -I%t -fmodule-file=x.y=%t/x.y.pcm -fmodule-file=x=%t/x.pcm -verify %t/test.x.cpp
 
 //--- x.cppm
@@ -35,9 +34,9 @@ int use_3 = c; // expected-error {{use of undeclared identifier 'c'}}
 
 //--- test.cpp
 #ifdef INTERFACE
-export module MODULE_NAME; // expected-error {{the name of a module declaration cannot contains an object-like macro 'MODULE_NAME', and the macro will not expand}}
+export module z;
 #else
-module MODULE_NAME; // expected-error {{the name of a module declaration cannot contains an object-like macro 'MODULE_NAME', and the macro will not expand}}
+module a.b;
 #endif
 
 import x;
