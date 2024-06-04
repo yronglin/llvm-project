@@ -1133,6 +1133,90 @@ void Preprocessor::CollectPpImportSuffix(SmallVectorImpl<Token> &Toks) {
 }
 
 
+void Preprocessor::CheckModuleName(Token Tok, bool AllowMacroExpansion) {
+  assert(Tok.is(tok::identifier) && "The first token must be an identifier");
+  bool ExpectsIdentifier = false;
+  SmallVector<Token, 8> ModuleName{Tok}, PartitionName;
+  auto *CurrLexingName = &ModuleName;
+  Token ColonTok;
+
+  while (true) {
+    if (AllowMacroExpansion)
+      Lex(Tok);
+    else
+      LexUnexpandedToken(Tok);
+    if (ExpectsIdentifier && Tok.is(tok::identifier)) {
+      auto *MI = getMacroInfo(Tok.getIdentifierInfo());
+      if (getLangOpts().CPlusPlusModules && !AllowMacroExpansion && MI &&
+          MI->isObjectLike()) {
+        Diag(Tok, diag::err_module_decl_cannot_be_macros)
+            << Tok.getLocation() << (CurrLexingName == &PartitionName)
+            << Tok.getIdentifierInfo();
+      }
+      CurrLexingName->push_back(Tok);
+      ExpectsIdentifier = false;
+      continue;
+    }
+
+    if (!ExpectsIdentifier && Tok.is(tok::period)) {
+      CurrLexingName->push_back(Tok);
+      ExpectsIdentifier = true;
+      continue;
+    }
+
+    if (getLangOpts().CPlusPlusModules && !ExpectsIdentifier &&
+        Tok.is(tok::colon)) {
+      ColonTok = Tok;
+      CurrLexingName = &PartitionName;
+      ExpectsIdentifier = true;
+      continue;
+    }
+
+    // [cpp.module]/p2: where the pp-tokens (if any) shall not begin with a (
+    // preprocessing token [...]
+    if (!ExpectsIdentifier && Tok.is(tok::l_paren)) {
+      Diag(Tok, diag::err_unxepected_paren_in_module_decl)
+          << (CurrLexingName == &PartitionName);
+    }
+    break;
+  }
+
+  Tok.clearFlag(Token::DisableExpand);
+  auto LastTokCopy = std::make_unique<Token[]>(1);
+  *LastTokCopy.get() = Tok;
+  EnterTokenStream(std::move(LastTokCopy), 1,
+                   /*DisableMacroExpansion=*/false,
+                   /*IsReinject=*/false);
+
+  auto CreateAnnotTok = [&](ArrayRef<Token> Names) {
+    Token NameTok;
+    NameTok.startToken();
+    NameTok.setKind(tok::annot_module_name);
+    NameTok.setLocation(Names.front().getLocation());
+    NameTok.setAnnotationEndLoc(Names.back().getLocation());
+    Token *AnnotValue = getPreprocessorAllocator().Allocate<Token>(Names.size() + 1);
+    std::copy(Names.begin(), Names.end(), AnnotValue);
+    AnnotValue[Names.size()].startToken();
+    AnnotValue[Names.size()].setKind(tok::eof);
+    NameTok.setAnnotationValue(static_cast<void *>(AnnotValue));
+    return NameTok;
+  };
+
+  SmallVector<Token, 4> Toks{CreateAnnotTok(ModuleName)};
+  if (CurrLexingName == &PartitionName) {
+    Toks.push_back(ColonTok);
+    if (!PartitionName.empty())
+      Toks.push_back(CreateAnnotTok(PartitionName));
+  }
+
+  // Put the last token back to stream, it's not a valid part of module name.
+  auto ToksCopy = std::make_unique<Token[]>(Toks.size());
+  std::copy(Toks.begin(), Toks.end(), ToksCopy.get());
+  EnterTokenStream(std::move(ToksCopy), Toks.size(),
+                   /*DisableMacroExpansion=*/true,
+                   /*IsReinject=*/false);
+}
+
 /// Lex a token following the 'import' contextual keyword.
 ///
 ///     pp-import: [C++20]
@@ -1376,47 +1460,13 @@ bool Preprocessor::LexAfterModuleDecl(Token &Result) {
 
   // If we don't expect an identifier but got an identifier, it's not a part of
   // module name.
-  if (!ModuleDeclarationExpectsIdentifier && Result.is(tok::identifier)) {
+  if (Result.isNot(tok::identifier)) {
     EnterTokens(Result, /*DisableMacroExpansion=*/false);
     return false;
   }
 
-  // The token sequence
-  //
-  // export[opt] module identifier (. identifier)*
-  //
-  // indicates a module directive. We already saw the 'module'
-  // contextual keyword, so now we're looking for the identifiers.
-  if (ModuleDeclarationExpectsIdentifier && Result.is(tok::identifier)) {
-    auto *MI = getMacroInfo(Result.getIdentifierInfo());
-    if (MI && MI->isObjectLike()) {
-      Diag(Result, diag::err_module_decl_cannot_be_macros)
-          << Result.getLocation() << ModuleDeclarationLexingPartitionName
-          << Result.getIdentifierInfo();
-    }
-    ModuleDeclarationExpectsIdentifier = false;
-    CurLexerCallback = CLK_LexAfterModuleDecl;
-    return true;
-  }
-
-  // If we're expecting a '.', a ':' or a ';', and we got a '.', then wait until
-  // we see the next identifier.
-  if (!ModuleDeclarationExpectsIdentifier &&
-      Result.isOneOf(tok::period, tok::colon)) {
-    ModuleDeclarationExpectsIdentifier = true;
-    ModuleDeclarationLexingPartitionName = Result.is(tok::colon);
-    CurLexerCallback = CLK_LexAfterModuleDecl;
-    return true;
-  }
-
-  // [cpp.module]/p2: where the pp-tokens (if any) shall not begin with a (
-  // preprocessing token [...]
-  if (!ModuleDeclarationExpectsIdentifier && Result.is(tok::l_paren)) {
-    ModuleDeclarationExpectsIdentifier = false;
-    Diag(Result, diag::err_unxepected_paren_in_module_decl)
-        << ModuleDeclarationLexingPartitionName;
-  }
-
+  CheckModuleName(Result, /*AllowMacroExpansion=*/false);
+  Lex(Result);
   return true;
 }
 

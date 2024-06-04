@@ -2675,36 +2675,41 @@ bool Parser::ParseModuleName(
     SourceLocation UseLoc,
     SmallVectorImpl<std::pair<IdentifierInfo *, SourceLocation>> &Path,
     bool IsImport) {
+  if (Tok.isNot(tok::annot_module_name)) {
+    if (Tok.is(tok::code_completion)) {
+      cutOffParsing();
+      Actions.CodeCompleteModuleImport(UseLoc, Path);
+      return true;
+    }
+    return true;
+  }
+
+  auto *CurrTok = static_cast<Token *>(Tok.getAnnotationValue());
+  ConsumeAnnotationToken();
   // Parse the module path.
-  while (true) {
-    if (!Tok.is(tok::identifier)) {
-      if (Tok.is(tok::code_completion)) {
+  while (CurrTok->isNot(tok::eof)) {
+    if (!CurrTok->is(tok::identifier)) {
+      if (CurrTok->is(tok::code_completion)) {
         cutOffParsing();
         Actions.CodeCompleteModuleImport(UseLoc, Path);
         return true;
       }
 
-      Diag(Tok, diag::err_module_expected_ident) << IsImport;
-      SkipUntil(tok::semi, StopBeforeMatch);
+      // Diag(Tok, diag::err_module_expected_ident) << IsImport;
+      // SkipUntil(tok::semi, StopBeforeMatch);
       return true;
     }
 
     // Record this part of the module path.
-    Path.push_back(std::make_pair(Tok.getIdentifierInfo(), Tok.getLocation()));
-    ConsumeToken();
+    Path.push_back(std::make_pair(CurrTok->getIdentifierInfo(), CurrTok->getLocation()));
+    ++CurrTok;
 
-    if (!TryConsumeToken(tok::period)) {
-      // [cpp.module]/p2: where the pp-tokens (if any) shall not begin with a (
-      // preprocessing token [...]
-      //
-      // We already diagnose in preprocessor and just skip to semicolon.
-      if (Tok.is(tok::l_paren)) {
-        SkipUntil(tok::semi, StopBeforeMatch);
-        return true;
-      }
-      return false;
-    }
+    if (CurrTok->is(tok::period)) {
+      CurrTok++;
+    } else
+      break;
   }
+  return false;
 }
 
 /// Try recover parser when module annotation appears where it must not
