@@ -16,6 +16,8 @@
 #include "clang/AST/ASTLambda.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/TokenKinds.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Parse/RAIIObjectsForParser.h"
 #include "clang/Sema/DeclSpec.h"
@@ -2580,7 +2582,7 @@ Decl *Parser::ParseModuleImport(SourceLocation AtLoc,
     // This is a header import that the preprocessor mapped to a module import.
     HeaderUnit = reinterpret_cast<Module *>(Tok.getAnnotationValue());
     ConsumeAnnotationToken();
-  } else if (Tok.is(tok::colon)) {
+  } else if (Tok.is(tok::annot_module_name)) {
     SourceLocation ColonLoc = ConsumeToken();
     if (!getLangOpts().CPlusPlusModules)
       Diag(ColonLoc, diag::err_unsupported_module_partition)
@@ -2701,7 +2703,10 @@ bool Parser::ParseModuleName(
     SkipUntil(tok::semi, StopBeforeMatch);
     return true;
   };
-  if (Tok.isNot(tok::annot_module_name))
+  if (Tok.is(tok::annot_module_name)) {
+    Tok.getAnnotationValueAs<ModuleNameInfo *>()-
+  }
+  if (Tok.isNot(tok::annot_module_name) || Tok.getAnnotationValueAs<ModuleNameInfo *>()->getToken().back().isNot(tok::identifier))
     return ExpectIdentifier(Tok);
   auto *Info = static_cast<ModuleNameInfo *>(Tok.getAnnotationValue());
   ConsumeAnnotationToken();

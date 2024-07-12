@@ -46,6 +46,7 @@
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Registry.h"
 #include <cassert>
 #include <cstddef>
@@ -1740,8 +1741,8 @@ public:
   /// Lex a token, forming a header-name token if possible.
   bool LexHeaderName(Token &Result, bool AllowMacroExpansion = true);
 
-  void LexModuleName(Token &Result, const Token FirstName,
-                     bool AllowMacroExpansion = true);
+  /// Lex a module name or a partition name.
+  bool LexModuleName(Token &Result, bool AllowMacroExpansion = true);
 
   /// Lex the parameters for an #embed directive, returns nullopt on error.
   std::optional<LexEmbedParametersResult> LexEmbedParameters(Token &Current,
@@ -3071,6 +3072,41 @@ struct EmbedAnnotationData {
 
 /// Registry of pragma handlers added by plugins
 using PragmaHandlerRegistry = llvm::Registry<PragmaHandler>;
+
+/// Module/Partition name token sequance.
+///
+///     module-name:
+///           module-name-qualifier[opt] identifier
+///
+///     module-name-qualifier
+///           module-name-qualifier[opt] identifier .
+class ModuleNameInfo {
+  friend class Preprocessor;
+  ArrayRef<Token> Tokens;
+  const Token *Colon;
+
+public:
+  ModuleNameInfo(ArrayRef<Token> Toks, const Token *Colon = nullptr);
+  ArrayRef<Token> getToken() const {
+    return Tokens;
+  }
+  bool hasModuleName() const { return !Colon || Tokens.begin() != Colon; }
+  bool hasPartitionName() const { return Colon; }
+  ArrayRef<Token> getModuleName() const {
+    if (hasPartitionName())
+      return ArrayRef(Tokens.begin(), Colon);
+    return Tokens;
+  }
+  ArrayRef<Token> getPartitionName() const {
+    assert(hasPartition() && "Partition name does not exist");
+    return ArrayRef(Colon + 1, Tokens.end());
+  }
+
+  void getModulePath(
+      SmallVectorImpl<std::pair<IdentifierInfo *, SourceLocation>> &Path);
+  void getPartitionPath(
+      SmallVectorImpl<std::pair<IdentifierInfo *, SourceLocation>> &Path);
+};
 
 } // namespace clang
 

@@ -16,6 +16,7 @@
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/TokenKinds.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include <cassert>
 
@@ -235,6 +236,9 @@ public:
     assert(isAnnotation() && "Used AnnotVal on non-annotation token");
     return PtrData;
   }
+  template <class T> T getAnnotationValueAs() const {
+    return static_cast<T>(getAnnotationValue());
+  }
   void setAnnotationValue(void *val) {
     assert(isAnnotation() && "Used AnnotVal on non-annotation token");
     PtrData = val;
@@ -343,17 +347,6 @@ struct PPConditionalInfo {
 struct PragmaLoopHintInfo {
   Token PragmaName;
   Token Option;
-  ArrayRef<Token> Toks;
-};
-
-/// Module/Partition name token sequance.
-///
-///     module-name:
-///           module-name-qualifier[opt] identifier
-///
-///     module-name-qualifier
-///           module-name-qualifier[opt] identifier .
-struct ModuleNameInfo {
   ArrayRef<Token> Toks;
 };
 } // end namespace clang

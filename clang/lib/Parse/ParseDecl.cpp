@@ -19,6 +19,7 @@
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TokenKinds.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Parse/Parser.h"
 #include "clang/Parse/RAIIObjectsForParser.h"
@@ -3960,7 +3961,7 @@ void Parser::ParseDeclarationSpecifiers(
       goto DoneWithDeclSpec;
     case tok::annot_module_name: {
       PP.EnterTokenStream(
-          static_cast<ModuleNameInfo *>(Tok.getAnnotationValue())->Toks,
+          Tok.getAnnotationValueAs<ModuleNameInfo *>()->getToken(),
           /*DisableMacroExpansion=*/true, /*IsReinject=*/false);
       ConsumeAnyToken();
       [[fallthrough]];
