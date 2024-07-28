@@ -642,6 +642,8 @@ bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result,
 
   case tok::kw_export:
     switch (NextToken().getKind()) {
+    case tok::kw_import:
+      goto import_decl;
     case tok::kw_module:
       goto module_decl;
 

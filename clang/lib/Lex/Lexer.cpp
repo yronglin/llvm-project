@@ -3720,6 +3720,10 @@ LexStart:
   // CurPtr - Cache BufferPtr in an automatic variable.
   const char *CurPtr = BufferPtr;
 
+  if (StringRef(CurPtr, 7).starts_with("include")) {
+    llvm::errs() << "Found it\n";
+  }
+
   // Small amounts of horizontal whitespace is very common between tokens.
   if (isHorizontalWhitespace(*CurPtr)) {
     do {

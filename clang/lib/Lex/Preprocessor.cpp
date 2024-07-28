@@ -863,11 +863,20 @@ bool Preprocessor::HandleIdentifier(Token &Identifier) {
     CurLexerCallback = CLK_LexAfterModuleImport;
   }
 
-  if ((II.isModulesDeclaration() || Identifier.is(tok::kw_module)) &&
-      !InMacroArgs && !DisableMacroExpansion &&
-      (getLangOpts().CPlusPlusModules || getLangOpts().DebuggerSupport) &&
-      CurLexerCallback != CLK_CachingLexer) {
-    CurLexerCallback = CLK_LexAfterModuleDecl;
+  // If this is the C++20 'import' or 'module' contextual keyword, note that the
+  // next token indicates a module name.
+  if (getLangOpts().CPlusPlusModules && !InMacroArgs &&
+      !DisableMacroExpansion && CurLexerCallback != CLK_CachingLexer &&
+      (II.isModulesImport() || II.isModulesDeclaration()) &&
+      HandleModuleContextualKeyword(Identifier)) {
+    if (II.isModulesImport()) {
+      ModuleImportLoc = Identifier.getLocation();
+      IsAtImport = false;
+      CurLexerCallback = CLK_LexAfterModuleImport;
+    }
+    if (II.isModulesDeclaration())
+      CurLexerCallback = CLK_LexAfterModuleDecl;
+    NamedModuleImportPath.clear();
   }
   return true;
 }
@@ -925,60 +934,29 @@ void Preprocessor::Lex(Token &Result) {
       TrackGMFState.handleExport();
       StdCXXImportSeqState.handleExport();
       ModuleDeclState.handleExport();
+      LastTokenWasExportKeyword = Result;
       break;
-    case tok::annot_module_name: {
-      auto *Info = static_cast<ModuleNameInfo *>(Result.getAnnotationValue());
-      for (const auto &Tok : Info->getTokens()) {
-        switch (Tok.getKind()) {
-        case tok::identifier:
-          ModuleDeclState.handleIdentifier(Tok.getIdentifierInfo());
-          break;
-        case tok::period:
-          ModuleDeclState.handlePeriod();
-          break;
-        case tok::colon:
-          ModuleDeclState.handleColon();
-          break;
-        default:
-          llvm_unreachable("Unexpected token in module name");
-        }
-      }
-      if (ModuleDeclState.isModuleCandidate())
-        break;
-      TrackGMFState.handleMisc();
-      StdCXXImportSeqState.handleMisc();
-      ModuleDeclState.handleMisc();
+    case tok::kw_module:
+      TrackGMFState.handleModule(StdCXXImportSeqState.afterTopLevelSeq());
+      ModuleDeclState.handleModule();
       break;
-    }
-    case tok::identifier:
-      // Check "import" and "module" when there is no open bracket. The two
-      // identifiers are not meaningful with open brackets.
+    case tok::kw_import:
       if (StdCXXImportSeqState.atTopLevel()) {
-        if (Result.getIdentifierInfo()->isModulesImport()) {
-          TrackGMFState.handleImport(StdCXXImportSeqState.afterTopLevelSeq());
-          StdCXXImportSeqState.handleImport();
-          if (StdCXXImportSeqState.afterImportSeq()) {
-            ModuleImportLoc = Result.getLocation();
-            NamedModuleImportPath.clear();
-            IsAtImport = false;
-            CurLexerCallback = CLK_LexAfterModuleImport;
-          }
-          break;
-        }
-        if (Result.getIdentifierInfo()->isModulesDeclaration()) {
-          TrackGMFState.handleModule(StdCXXImportSeqState.afterTopLevelSeq());
-          ModuleDeclState.handleModule();
-          CurLexerCallback = CLK_LexAfterModuleDecl;
-          break;
-        }
+        TrackGMFState.handleImport(StdCXXImportSeqState.afterTopLevelSeq());
+        StdCXXImportSeqState.handleImport();
       }
-      if (ModuleDeclState.isModuleCandidate())
-        break;
-      [[fallthrough]];
+      ModuleImportLoc = Result.getLocation();
+      NamedModuleImportPath.clear();
+      IsAtImport = false;
+      break;
+    case tok::annot_module_name:
+      ModuleDeclState.handleModuleName(Result);
+      break;
     default:
       TrackGMFState.handleMisc();
       StdCXXImportSeqState.handleMisc();
       ModuleDeclState.handleMisc();
+      LastTokenWasExportKeyword = std::nullopt;
       break;
     }
   }
@@ -1010,6 +988,55 @@ void Preprocessor::LexTokensUntilEOF(std::vector<Token> *Tokens) {
     if (Tokens != nullptr)
       Tokens->push_back(Tok);
   }
+}
+
+/// P1857R3: Modules Dependency Discovery
+///
+/// At the start of phase 4 an import or module token is treated as starting a
+/// directive and are converted to their respective keywords iff:
+///   • After skipping horizontal whitespace are
+///     • at the start of a logical line, or
+///     • preceded by an 'export' at the start of the logical line.
+///   • Are followed by an identifier pp token (before macro expansion), or
+///     • <, ", or : (but not ::) pp tokens for 'import', or
+///     • ; for 'module'
+/// Otherwise the token is treated as an identifier.
+bool Preprocessor::HandleModuleContextualKeyword(Token &Result) {
+  if (!getLangOpts().CPlusPlusModules || Result.isNot(tok::identifier) ||
+      (!Result.getIdentifierInfo()->isModulesImport() &&
+       !Result.getIdentifierInfo()->isModulesDeclaration()))
+    return false;
+  assert(!LastTokenWasExportKeyword ||
+         LastTokenWasExportKeyword->is(tok::kw_export) &&
+             "If LastTokenWasExportKeyword has a value, its value must be "
+             "kw_export");
+  if ((LastTokenWasExportKeyword &&
+       !LastTokenWasExportKeyword->isAtStartOfLine()) ||
+      (!LastTokenWasExportKeyword && !Result.isAtStartOfLine()))
+    return false;
+  
+  // Peek next token.
+  Token NextTok;
+  LexUnexpandedToken(NextTok);
+  auto ToksCopy = std::make_unique<Token[]>(1);
+  *ToksCopy.get() = NextTok;
+  EnterTokenStream(std::move(ToksCopy), /*NumToks=*/1,
+                    /*DisableMacroExpansion=*/false,
+                    /*IsReinject=*/false);
+  if (Result.getIdentifierInfo()->isModulesImport() &&
+      NextTok.isOneOf(tok::identifier, tok::l_square, tok::string_literal,
+                      tok::colon)) {
+    Result.setKind(tok::kw_import);
+    return true;
+  }
+  if (Result.getIdentifierInfo()->isModulesDeclaration() &&
+      NextTok.isOneOf(tok::identifier, tok::semi)) {
+    Result.setKind(tok::kw_module);
+    return true;
+  }
+
+  // Ok, it's an identifier.
+  return false;
 }
 
 /// Lex a header-name token (including one formed from header-name-tokens if
