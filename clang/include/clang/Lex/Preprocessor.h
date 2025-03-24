@@ -48,6 +48,7 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Registry.h"
+#include "llvm/Support/TrailingObjects.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -127,6 +128,70 @@ enum class EmbedResult {
   NotFound = 0, // Corresponds to __STDC_EMBED_NOT_FOUND__
   Found = 1,    // Corresponds to __STDC_EMBED_FOUND__
   Empty = 2,    // Corresponds to __STDC_EMBED_EMPTY__
+};
+
+/// Represents module or partition name token sequance.
+///
+///     module-name:
+///           module-name-qualifier[opt] identifier
+///
+///     partition-name: [C++20]
+///           : module-name-qualifier[opt] identifier
+///
+///     module-name-qualifier
+///           module-name-qualifier[opt] identifier .
+///
+/// This class can only be created by the preprocessor and guarantees that the
+/// two source array being contiguous in memory and only contains 3 kind of
+/// tokens (identifier, '.' and ':'). And only available when the preprocessor
+/// returns annot_module_name token.
+///
+/// For exmaple:
+///
+/// export module m.n:c.d
+///
+/// The module name array has 3 tokens ['m', '.', 'n'].
+/// The partition name array has 4 tokens [':', 'c', '.', 'd'].
+///
+/// When import a partition in a named module fragment (Eg. import :part1;),
+/// the module name array will be empty, and the partition name array has 2
+/// tokens.
+///
+/// When we meet a private-module-fragment (Eg. module :private;), preprocessor
+/// will not return a annot_module_name token, but will return 2 separate tokens
+/// [':', 'kw_private'].
+class ModuleName final
+    : llvm::TrailingObjects<ModuleName,
+                            std::pair<IdentifierInfo *, SourceLocation>> {
+  friend TrailingObjects;
+  unsigned NamedModulePathSize : 16;
+  unsigned HasPartition : 1;
+
+  unsigned numTrailingObjects(OverloadToken<Token>) const {
+    return NamedModulePathSize;
+  }
+
+  ModuleName(ModuleIdPath NamedModuleIdPath, bool HasPartition);
+
+public:
+  static ModuleName *Create(Preprocessor &PP, ArrayRef<Token> Toks);
+
+  ModuleIdPath getNamedModuleIdPath() const {
+    return {getTrailingObjects<std::pair<IdentifierInfo *, SourceLocation>>(),
+            NamedModulePathSize};
+  }
+
+  SourceLocation getBeginLoc() const {
+    return getNamedModuleIdPath().front().second;
+  }
+
+  SourceLocation getEndLoc() const {
+    return getNamedModuleIdPath().back().second;
+  }
+
+  SourceRange getRange() const {
+    return {getBeginLoc(), getEndLoc()};
+  }
 };
 
 /// Engages in a tight little dance with the lexer to efficiently
@@ -337,6 +402,15 @@ private:
 
   /// Whether the last token we lexed was an '@'.
   bool LastTokenWasAt = false;
+  
+  struct ExportContextualKeywordInfo {
+    Token ExportTok;
+    bool TokAtPhysicalStartOfLine;
+  };
+
+  /// Whether the last token we lexed was an 'export' keyword.
+  std::optional<ExportContextualKeywordInfo> LastTokenWasExportKeyword =
+      std::nullopt;
 
   /// A position within a C++20 import-seq.
   class StdCXXImportSeq {
@@ -616,6 +690,10 @@ private:
 
   ModuleDeclSeq ModuleDeclState;
 
+public:
+  const ModuleDeclSeq &getModuleDeclState() const { return ModuleDeclState; }
+
+private:
   /// Whether the module import expects an identifier next. Otherwise,
   /// it expects a '.' or ';'.
   bool ModuleImportExpectsIdentifier = false;
@@ -1752,7 +1830,26 @@ public:
   std::optional<LexEmbedParametersResult> LexEmbedParameters(Token &Current,
                                                              bool ForHasEmbed);
 
-  bool LexAfterModuleImport(Token &Result);
+  void ReadModuleNameContinueToken(Token &Result, bool AllowMacroExpansion = true);
+  bool ReadModuleNameContinue(Token &Result,
+                              SmallVectorImpl<Token> &ModuleNameToks,
+                              bool AllowMacroExpansion = true);
+  bool ReadModuleNameToken(Token &Result, bool IsCXXModuleImport,
+                           bool IsFirstTok = false);
+  bool ParseModuleName(Token Result, SmallVectorImpl<Token> &ModuleNameToks);
+  bool LexModuleNameOrHeaderName(Token &Result, bool IsImport);
+  /// Callback invoked when the lexer sees one of export, import or module token
+  /// at the start of a line.
+  ///
+  /// This consumes the import, module directive, modifies the
+  /// lexer/preprocessor state, and advances the lexer(s) so that the next token
+  /// read is the correct one.
+  bool HandleModuleContextualKeyword(Token &Result, bool TokAtPhysicalStartOfLine);
+
+  void HandleModuleDirective(Token &ModuleOrImportKeyword);
+  bool LexAfterModuleDecl(SmallVectorImpl<Token> &Suffix);
+  bool LexAfterModuleImport(SmallVectorImpl<Token> &Suffix);
+  bool LexAfterModuleImport(Token &Result, bool IsImport);
   void CollectPpImportSuffix(SmallVectorImpl<Token> &Toks);
 
   void makeModuleVisible(Module *M, SourceLocation Loc,
@@ -2272,10 +2369,16 @@ public:
     }
   }
 
+  /// Peek the next token. If so, return the token, if not, this
+  /// method should have no observable side-effect on the lexed tokens.
+  std::optional<Token> peekNextPPToken();
+
   /// Determine whether the next preprocessor token to be
   /// lexed is a '('.  If so, consume the token and return true, if not, this
   /// method should have no observable side-effect on the lexed tokens.
-  bool isNextPPTokenLParen();
+  bool isNextPPTokenLParen() {
+    return peekNextPPToken().value_or(Token{}).is(tok::l_paren);
+  }
 
 private:
   /// Identifiers used for SEH handling in Borland. These are only
@@ -2335,7 +2438,7 @@ public:
   ///
   /// \return The location of the end of the directive (the terminating
   /// newline).
-  SourceLocation CheckEndOfDirective(const char *DirType,
+  SourceLocation CheckEndOfDirective(StringRef DirType,
                                      bool EnableMacros = false);
 
   /// Read and discard all tokens remaining on the current line until
@@ -2654,17 +2757,6 @@ private:
 
   void removeCachedMacroExpandedTokensOfLastLexer();
 
-  /// Peek the next token. If so, return the token, if not, this
-  /// method should have no observable side-effect on the lexed tokens.
-  std::optional<Token> peekNextPPToken();
-
-  /// Determine whether the next preprocessor token to be
-  /// lexed is a '('.  If so, consume the token and return true, if not, this
-  /// method should have no observable side-effect on the lexed tokens.
-  bool isNextPPTokenLParen() {
-    return peekNextPPToken().value_or(Token{}).is(tok::l_paren);
-  }
-
   /// After reading "MACRO(", this method is invoked to read all of the formal
   /// arguments specified for the macro invocation.  Returns null on error.
   MacroArgs *ReadMacroCallArgumentList(Token &MacroName, MacroInfo *MI,
@@ -2789,6 +2881,7 @@ private:
   void HandleIncludeNextDirective(SourceLocation HashLoc, Token &Tok);
   void HandleIncludeMacrosDirective(SourceLocation HashLoc, Token &Tok);
   void HandleImportDirective(SourceLocation HashLoc, Token &Tok);
+  void HandleCXXModuleOrImportDirective(Token &KeywordTok);
   void HandleMicrosoftImportDirective(Token &Tok);
 
 public:
