@@ -57,23 +57,6 @@ static void checkModuleImportContext(Sema &S, Module *M,
   }
 }
 
-// We represent the primary and partition names as 'Paths' which are sections
-// of the hierarchical access path for a clang module.  However for C++20
-// the periods in a name are just another character, and we will need to
-// flatten them into a string.
-static std::string stringFromPath(ModuleIdPath Path) {
-  std::string Name;
-  if (Path.empty())
-    return Name;
-
-  for (auto &Piece : Path) {
-    if (!Name.empty())
-      Name += ".";
-    Name += Piece.getIdentifierInfo()->getName();
-  }
-  return Name;
-}
-
 /// Helper function for makeTransitiveImportsVisible to decide whether
 /// the \param Imported module unit is in the same module with the \param
 /// CurrentModule.
@@ -220,45 +203,11 @@ void Sema::HandleStartOfHeaderUnit() {
   TU->setLocalOwningModule(Mod);
 }
 
-/// Tests whether the given identifier is reserved as a module name and
-/// diagnoses if it is. Returns true if a diagnostic is emitted and false
-/// otherwise.
-static bool DiagReservedModuleName(Sema &S, const IdentifierInfo *II,
-                                   SourceLocation Loc) {
-  enum {
-    Valid = -1,
-    Invalid = 0,
-    Reserved = 1,
-  } Reason = Valid;
-
-  if (II->isStr("module") || II->isStr("import"))
-    Reason = Invalid;
-  else if (II->isReserved(S.getLangOpts()) !=
-           ReservedIdentifierStatus::NotReserved)
-    Reason = Reserved;
-
-  // If the identifier is reserved (not invalid) but is in a system header,
-  // we do not diagnose (because we expect system headers to use reserved
-  // identifiers).
-  if (Reason == Reserved && S.getSourceManager().isInSystemHeader(Loc))
-    Reason = Valid;
-
-  switch (Reason) {
-  case Valid:
-    return false;
-  case Invalid:
-    return S.Diag(Loc, diag::err_invalid_module_name) << II;
-  case Reserved:
-    S.Diag(Loc, diag::warn_reserved_module_name) << II;
-    return false;
-  }
-  llvm_unreachable("fell off a fully covered switch");
-}
-
-Sema::DeclGroupPtrTy
-Sema::ActOnModuleDecl(SourceLocation StartLoc, SourceLocation ModuleLoc,
-                      ModuleDeclKind MDK, ModuleIdPath Path,
-                      ModuleIdPath Partition, ModuleImportState &ImportState) {
+Sema::DeclGroupPtrTy Sema::ActOnModuleDecl(SourceLocation StartLoc,
+                                           SourceLocation ModuleLoc,
+                                           ModuleDeclKind MDK,
+                                           ModuleNameIdentifierLocPath *Path,
+                                           ModuleImportState &ImportState) {
   assert(getLangOpts().CPlusPlusModules &&
          "should only have module decl in standard C++ modules");
 
@@ -268,8 +217,7 @@ Sema::ActOnModuleDecl(SourceLocation StartLoc, SourceLocation ModuleLoc,
   // module state;
   ImportState = ModuleImportState::NotACXX20Module;
 
-  bool IsPartition = !Partition.empty();
-  if (IsPartition)
+  if (Path->hasPartition())
     switch (MDK) {
     case ModuleDeclKind::Implementation:
       MDK = ModuleDeclKind::PartitionImplementation;
@@ -342,47 +290,14 @@ Sema::ActOnModuleDecl(SourceLocation StartLoc, SourceLocation ModuleLoc,
     }
   }
 
-  // C++23 [module.unit]p1: ... The identifiers module and import shall not
-  // appear as identifiers in a module-name or module-partition. All
-  // module-names either beginning with an identifier consisting of std
-  // followed by zero or more digits or containing a reserved identifier
-  // ([lex.name]) are reserved and shall not be specified in a
-  // module-declaration; no diagnostic is required.
+  StringRef ModuleName = Path->getFlatName();
 
-  // Test the first part of the path to see if it's std[0-9]+ but allow the
-  // name in a system header.
-  StringRef FirstComponentName = Path[0].getIdentifierInfo()->getName();
-  if (!getSourceManager().isInSystemHeader(Path[0].getLoc()) &&
-      (FirstComponentName == "std" ||
-       (FirstComponentName.starts_with("std") &&
-        llvm::all_of(FirstComponentName.drop_front(3), &llvm::isDigit))))
-    Diag(Path[0].getLoc(), diag::warn_reserved_module_name)
-        << Path[0].getIdentifierInfo();
-
-  // Then test all of the components in the path to see if any of them are
-  // using another kind of reserved or invalid identifier.
-  for (auto Part : Path) {
-    if (DiagReservedModuleName(*this, Part.getIdentifierInfo(), Part.getLoc()))
-      return nullptr;
-  }
-
-  // Flatten the dots in a module name. Unlike Clang's hierarchical module map
-  // modules, the dots here are just another character that can appear in a
-  // module name.
-  std::string ModuleName = stringFromPath(Path);
-  if (IsPartition) {
-    ModuleName += ":";
-    ModuleName += stringFromPath(Partition);
-  }
   // If a module name was explicitly specified on the command line, it must be
   // correct.
   if (!getLangOpts().CurrentModule.empty() &&
       getLangOpts().CurrentModule != ModuleName) {
-    Diag(Path.front().getLoc(), diag::err_current_module_name_mismatch)
-        << SourceRange(Path.front().getLoc(), IsPartition
-                                                  ? Partition.back().getLoc()
-                                                  : Path.back().getLoc())
-        << getLangOpts().CurrentModule;
+    Diag(Path->getBeginLoc(), diag::err_current_module_name_mismatch)
+        << Path->getRange() << getLangOpts().CurrentModule;
     return nullptr;
   }
   const_cast<LangOptions&>(getLangOpts()).CurrentModule = ModuleName;
@@ -396,7 +311,7 @@ Sema::ActOnModuleDecl(SourceLocation StartLoc, SourceLocation ModuleLoc,
     // We can't have parsed or imported a definition of this module or parsed a
     // module map defining it already.
     if (auto *M = Map.findModule(ModuleName)) {
-      Diag(Path[0].getLoc(), diag::err_module_redefinition) << ModuleName;
+      Diag(Path->getBeginLoc(), diag::err_module_redefinition) << ModuleName;
       if (M->DefinitionLoc.isValid())
         Diag(M->DefinitionLoc, diag::note_prev_module_definition);
       else if (OptionalFileEntryRef FE = M->getASTFile())
@@ -419,7 +334,7 @@ Sema::ActOnModuleDecl(SourceLocation StartLoc, SourceLocation ModuleLoc,
     // keyword nor a module-partition implicitly imports the primary
     // module interface unit of the module as if by a module-import-
     // declaration.
-    IdentifierLoc ModuleNameLoc(Path[0].getLoc(),
+    IdentifierLoc ModuleNameLoc(Path->getBeginLoc(),
                                 PP.getIdentifierInfo(ModuleName));
 
     // The module loader will assume we're trying to import the module that
@@ -492,7 +407,7 @@ Sema::ActOnModuleDecl(SourceLocation StartLoc, SourceLocation ModuleLoc,
 
     // Make the import decl for the interface in the impl module.
     ImportDecl *Import = ImportDecl::Create(Context, CurContext, ModuleLoc,
-                                            Interface, Path[0].getLoc());
+                                            Interface, Path->getBeginLoc());
     CurContext->addDecl(Import);
 
     // Sequence initialization of the imported module before that of the current
@@ -574,34 +489,15 @@ Sema::ActOnPrivateModuleFragmentDecl(SourceLocation ModuleLoc,
 
 DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
                                    SourceLocation ExportLoc,
-                                   SourceLocation ImportLoc, ModuleIdPath Path,
-                                   bool IsPartition) {
-  assert((!IsPartition || getLangOpts().CPlusPlusModules) &&
+                                   SourceLocation ImportLoc,
+                                   ModuleNameIdentifierLocPath *Path) {
+  assert((!Path->hasPartition() || getLangOpts().CPlusPlusModules) &&
          "partition seen in non-C++20 code?");
 
   // For a C++20 module name, flatten into a single identifier with the source
   // location of the first component.
-  IdentifierLoc ModuleNameLoc;
-
-  std::string ModuleName;
-  if (IsPartition) {
-    // We already checked that we are in a module purview in the parser.
-    assert(!ModuleScopes.empty() && "in a module purview, but no module?");
-    Module *NamedMod = ModuleScopes.back().Module;
-    // If we are importing into a partition, find the owning named module,
-    // otherwise, the name of the importing named module.
-    ModuleName = NamedMod->getPrimaryModuleInterfaceName().str();
-    ModuleName += ":";
-    ModuleName += stringFromPath(Path);
-    ModuleNameLoc =
-        IdentifierLoc(Path[0].getLoc(), PP.getIdentifierInfo(ModuleName));
-    Path = ModuleIdPath(ModuleNameLoc);
-  } else if (getLangOpts().CPlusPlusModules) {
-    ModuleName = stringFromPath(Path);
-    ModuleNameLoc =
-        IdentifierLoc(Path[0].getLoc(), PP.getIdentifierInfo(ModuleName));
-    Path = ModuleIdPath(ModuleNameLoc);
-  }
+  StringRef ModuleName =
+      getLangOpts().CPlusPlusModules ? Path->getFlatName() : StringRef{};
 
   // Diagnose self-import before attempting a load.
   // [module.import]/9
@@ -618,7 +514,8 @@ DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
   }
 
   Module *Mod = getModuleLoader().loadModule(
-      ImportLoc, Path, Module::AllVisible, /*IsInclusionDirective=*/false);
+      ImportLoc, Path->getIdentifierLocs(), Module::AllVisible,
+      /*IsInclusionDirective=*/false);
   if (!Mod)
     return true;
 
@@ -643,7 +540,7 @@ static const ExportDecl *getEnclosingExportDecl(const Decl *D) {
 DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
                                    SourceLocation ExportLoc,
                                    SourceLocation ImportLoc, Module *Mod,
-                                   ModuleIdPath Path) {
+                                   ModuleNameIdentifierLocPath *Path) {
   if (Mod->isHeaderUnit())
     Diag(ImportLoc, diag::warn_experimental_header_unit);
 
@@ -676,7 +573,7 @@ DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
 
   SmallVector<SourceLocation, 2> IdentifierLocs;
 
-  if (Path.empty()) {
+  if (!Path) {
     // If this was a header import, pad out with dummy locations.
     // FIXME: Pass in and use the location of the header-name token in this
     // case.
@@ -684,17 +581,17 @@ DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
       IdentifierLocs.push_back(SourceLocation());
   } else if (getLangOpts().CPlusPlusModules && !Mod->Parent) {
     // A single identifier for the whole name.
-    IdentifierLocs.push_back(Path[0].getLoc());
+    IdentifierLocs.push_back(Path->getBeginLoc());
   } else {
     Module *ModCheck = Mod;
-    for (unsigned I = 0, N = Path.size(); I != N; ++I) {
+    for (const auto &I : Path->getIdentifierLocs()) {
       // If we've run out of module parents, just drop the remaining
       // identifiers.  We need the length to be consistent.
       if (!ModCheck)
         break;
       ModCheck = ModCheck->Parent;
 
-      IdentifierLocs.push_back(Path[I].getLoc());
+      IdentifierLocs.push_back(I.getLoc());
     }
   }
 
@@ -711,7 +608,7 @@ DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
   if (getLangOpts().CPlusPlusModules && ExportLoc.isValid() &&
       Mod->Kind == Module::ModuleKind::ModulePartitionImplementation) {
     Diag(ExportLoc, diag::err_export_partition_impl)
-        << SourceRange(ExportLoc, Path.back().getLoc());
+        << SourceRange(ExportLoc,Path->getEndLoc());
   } else if (!ModuleScopes.empty() && !currentModuleIsImplementation()) {
     // Re-export the module if the imported module is exported.
     // Note that we don't need to add re-exported module to Imports field

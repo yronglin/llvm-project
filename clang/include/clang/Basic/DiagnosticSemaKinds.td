@@ -502,8 +502,6 @@ def warn_reserved_extern_symbol: Warning<
 def warn_deprecated_literal_operator_id: Warning<
   "identifier %0 preceded by whitespace in a literal operator declaration "
   "is deprecated">, InGroup<DeprecatedLiteralOperator>;
-def warn_reserved_module_name : Warning<
-  "%0 is a reserved name for a module">, InGroup<ReservedModuleIdentifier>;
 def warn_import_implementation_partition_unit_in_interface_unit : Warning<
   "importing an implementation partition unit in a module interface is not recommended. "
   "Names from %0 may not be reachable">,
@@ -12135,7 +12133,6 @@ def err_private_module_fragment_not_module_interface : Error<
   "private module fragment in module implementation unit">;
 def note_not_module_interface_add_export : Note<
   "add 'export' here if this is intended to be a module interface unit">;
-def err_invalid_module_name : Error<"%0 is an invalid name for a module">;
 def err_extern_def_in_header_unit : Error<
   "non-inline external definitions are not permitted in C++ header units">;
 

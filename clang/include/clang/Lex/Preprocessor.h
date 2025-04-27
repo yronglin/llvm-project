@@ -48,6 +48,7 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Registry.h"
+#include "llvm/Support/TrailingObjects.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -82,6 +83,7 @@ class PreprocessorLexer;
 class PreprocessorOptions;
 class ScratchBuffer;
 class TargetInfo;
+class ModuleNameIdentifierLocPath;
 
 namespace Builtin {
 class Context;
@@ -326,8 +328,9 @@ private:
   /// lexed, if any.
   SourceLocation ModuleImportLoc;
 
-  /// The import path for named module that we're currently processing.
-  SmallVector<IdentifierLoc, 2> NamedModuleImportPath;
+  /// The source location of the \c module contextual keyword we just
+  /// lexed, if any.
+  SourceLocation ModuleDeclLoc;
 
   llvm::DenseMap<FileID, SmallVector<const char *>> CheckPoints;
   unsigned CheckPointCounter = 0;
@@ -337,6 +340,18 @@ private:
 
   /// Whether the last token we lexed was an '@'.
   bool LastTokenWasAt = false;
+
+  /// Whether we're importing a standard C++20 Named Modules.
+  bool ImportingCXXNamedModules = false;
+
+  struct ExportContextualKeywordInfo {
+    Token ExportTok;
+    bool TokAtPhysicalStartOfLine;
+  };
+
+  /// Whether the last token we lexed was an 'export' keyword.
+  std::optional<ExportContextualKeywordInfo> LastTokenWasExportKeyword =
+      std::nullopt;
 
   /// A position within a C++20 import-seq.
   class StdCXXImportSeq {
@@ -541,26 +556,7 @@ private:
         reset();
     }
 
-    void handleIdentifier(IdentifierInfo *Identifier) {
-      if (isModuleCandidate() && Identifier)
-        Name += Identifier->getName().str();
-      else if (!isNamedModule())
-        reset();
-    }
-
-    void handleColon() {
-      if (isModuleCandidate())
-        Name += ":";
-      else if (!isNamedModule())
-        reset();
-    }
-
-    void handlePeriod() {
-      if (isModuleCandidate())
-        Name += ".";
-      else if (!isNamedModule())
-        reset();
-    }
+    void handleModuleName(ModuleNameIdentifierLocPath *Data);
 
     void handleSemi() {
       if (!Name.empty() && isModuleCandidate()) {
@@ -615,10 +611,6 @@ private:
   };
 
   ModuleDeclSeq ModuleDeclState;
-
-  /// Whether the module import expects an identifier next. Otherwise,
-  /// it expects a '.' or ';'.
-  bool ModuleImportExpectsIdentifier = false;
 
   /// The identifier and source location of the currently-active
   /// \#pragma clang arc_cf_code_audited begin.
@@ -1750,6 +1742,27 @@ public:
   std::optional<LexEmbedParametersResult> LexEmbedParameters(Token &Current,
                                                              bool ForHasEmbed);
 
+  // bool LexModuleNameComponent(Token &Tok, IdentifierLoc &ModuleNameComponent, bool First, bool IsImport, bool AllowStringLiteral, bool Allow);
+  
+  // /// Lex a token, forming a header/module-name if possible.
+  // bool LexModuleName(Token &Result, SourceLocation UseLoc, bool IsImport);
+  
+  bool LexModuleNameContinue(Token &Tok, SourceLocation UseLoc,
+                              SmallVectorImpl<IdentifierLoc> &Path,
+                              bool IsImport);
+
+  bool DiagReservedModuleName(const IdentifierLoc &IdLoc);
+  void HandleCXXImportDirective(Token Import);
+  void HandleCXXModuleDirective(Token Module);
+  
+  /// Callback invoked when the lexer sees one of export, import or module token
+  /// at the start of a line.
+  ///
+  /// This consumes the import, module directive, modifies the
+  /// lexer/preprocessor state, and advances the lexer(s) so that the next token
+  /// read is the correct one.
+  bool HandleModuleContextualKeyword(Token &Result, bool TokAtPhysicalStartOfLine);
+
   bool LexAfterModuleImport(Token &Result);
   void CollectPpImportSuffix(SmallVectorImpl<Token> &Toks);
 
@@ -2334,7 +2347,7 @@ public:
   ///
   /// \return The location of the end of the directive (the terminating
   /// newline).
-  SourceLocation CheckEndOfDirective(const char *DirType,
+  SourceLocation CheckEndOfDirective(StringRef DirType,
                                      bool EnableMacros = false);
 
   /// Read and discard all tokens remaining on the current line until
@@ -2417,10 +2430,7 @@ public:
 
   /// If we're importing a standard C++20 Named Modules.
   bool isInImportingCXXNamedModules() const {
-    // NamedModuleImportPath will be non-empty only if we're importing
-    // Standard C++ named modules.
-    return !NamedModuleImportPath.empty() && getLangOpts().CPlusPlusModules &&
-           !IsAtImport;
+    return getLangOpts().CPlusPlusModules && ImportingCXXNamedModules;
   }
 
   /// Allocate a new MacroInfo object with the provided SourceLocation.
@@ -3072,6 +3082,74 @@ public:
 struct EmbedAnnotationData {
   StringRef BinaryData;
   StringRef FileName;
+};
+
+/// Represents module name annotation data.
+///
+///     module-name:
+///           module-name-qualifier[opt] identifier
+///
+///     partition-name: [C++20]
+///           : module-name-qualifier[opt] identifier
+///
+///     module-name-qualifier
+///           module-name-qualifier[opt] identifier .
+class ModuleNameIdentifierLocPath final
+    : llvm::TrailingObjects<ModuleNameIdentifierLocPath, IdentifierLoc> {
+  friend TrailingObjects;
+  unsigned NamedModulePathSize : 16;
+  LLVM_PREFERRED_TYPE(bool) unsigned IsCplusPlusModulesName : 1;
+  LLVM_PREFERRED_TYPE(bool) unsigned IsImported : 1;
+  LLVM_PREFERRED_TYPE(bool) unsigned HasPartition : 1;
+  unsigned : 13;
+
+  unsigned numTrailingObjects(OverloadToken<IdentifierLoc>) const {
+    return NamedModulePathSize;
+  }
+
+  ModuleNameIdentifierLocPath(ModuleIdPath Path,
+                              bool CPlusPlusModules, bool IsImported,
+                              bool HasPartition)
+      : NamedModulePathSize(Path.size()),
+        IsCplusPlusModulesName(CPlusPlusModules), IsImported(IsImported),
+        HasPartition(HasPartition) {
+    (void)llvm::copy(Path, getTrailingObjects<IdentifierLoc>());
+  }
+
+public:
+  static ModuleNameIdentifierLocPath *
+  Create(Preprocessor &PP, ModuleIdPath Path,
+         bool IsImported);
+  static std::string stringFromPath(ModuleIdPath Path);
+  
+  bool isCPlusPlusModulesName() const { return IsCplusPlusModulesName; }
+  bool isImported() const { return IsImported; }
+  bool hasPartition() const { return HasPartition; }
+  
+  // Flatten the dots in a module name. Unlike Clang's hierarchical module map
+  // modules, the dots here are just another character that can appear in a
+  // module name.
+  StringRef getFlatName() const {
+    assert(isCPlusPlusModulesName() && "Get flat name in non-C++ modules");
+    return getIdentifierLocs().front().getIdentifierInfo()->getName();
+  }
+
+  StringRef getFlatNameAsWritten() const;
+
+  ArrayRef<IdentifierLoc> getIdentifierLocs() const {
+    return {getTrailingObjects<IdentifierLoc>(), NamedModulePathSize};
+  }
+
+  SourceLocation getBeginLoc() const {
+    return getIdentifierLocs().front().getLoc();
+  }
+  SourceLocation getEndLoc() const {
+    return getIdentifierLocs().back().getLoc();
+  }
+  SourceRange getRange() const { return {getBeginLoc(), getEndLoc()}; }
+
+  void print(llvm::raw_ostream &OS) const;
+  void dump() const { print(llvm::errs()); }
 };
 
 /// Registry of pragma handlers added by plugins

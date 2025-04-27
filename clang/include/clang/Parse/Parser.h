@@ -167,10 +167,6 @@ class Parser : public CodeCompletionHandler {
   mutable IdentifierInfo *Ident_GNU_final;
   mutable IdentifierInfo *Ident_override;
 
-  // C++2a contextual keywords.
-  mutable IdentifierInfo *Ident_import;
-  mutable IdentifierInfo *Ident_module;
-
   // C++ type trait keywords that can be reverted to identifiers and still be
   // used as type traits.
   llvm::SmallDenseMap<IdentifierInfo *, tok::TokenKind> RevertibleTypeTraits;
@@ -3950,9 +3946,6 @@ private:
     return false;
   }
 
-  bool ParseModuleName(SourceLocation UseLoc,
-                       SmallVectorImpl<IdentifierLoc> &Path, bool IsImport);
-
   //===--------------------------------------------------------------------===//
   // C++11/G++: Type Traits [Type-Traits.html in the GCC manual]
   ExprResult ParseTypeTrait();
@@ -3974,6 +3967,8 @@ private:
                                  unsigned ArgumentIndex) override;
   void CodeCompleteIncludedFile(llvm::StringRef Dir, bool IsAngled) override;
   void CodeCompleteNaturalLanguage() override;
+  void CodeCompleteModuleImport(SourceLocation ImportLoc,
+                                ModuleIdPath Path) override;
 
   class GNUAsmQualifiers {
     unsigned Qualifiers = AQ_unspecified;

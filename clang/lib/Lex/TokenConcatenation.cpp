@@ -197,11 +197,12 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
   if (Tok.isAnnotation()) {
     // Modules annotation can show up when generated automatically for includes.
     assert(Tok.isOneOf(tok::annot_module_include, tok::annot_module_begin,
-                       tok::annot_module_end, tok::annot_embed) &&
+                       tok::annot_module_end, tok::annot_embed,
+                       tok::annot_module_name) &&
            "unexpected annotation in AvoidConcat");
 
     ConcatInfo = 0;
-    if (Tok.is(tok::annot_embed))
+    if (Tok.isOneOf(tok::annot_embed, tok::annot_module_name))
       return true;
   }
 

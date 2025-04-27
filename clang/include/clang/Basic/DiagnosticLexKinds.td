@@ -462,7 +462,7 @@ def err_pp_embed_device_file : Error<
   "device files are not yet supported by '#embed' directive">;
 
 def ext_pp_extra_tokens_at_eol : ExtWarn<
-  "extra tokens at end of #%0 directive">, InGroup<ExtraTokens>;
+  "extra tokens at end of %0 directive">, InGroup<ExtraTokens>;
 
 def ext_pp_comma_expr : Extension<"comma operator in operand of #if">;
 def ext_pp_bad_vaargs_use : Extension<
@@ -493,7 +493,7 @@ def warn_cxx98_compat_variadic_macro : Warning<
 def ext_named_variadic_macro : Extension<
   "named variadic macros are a GNU extension">, InGroup<VariadicMacros>;
 def err_embedded_directive : Error<
-  "embedding a #%0 directive within macro arguments is not supported">;
+  "embedding a %select{#|C++ }0%1 directive within macro arguments is not supported">;
 def ext_embedded_directive : Extension<
   "embedding a directive within macro arguments has undefined behavior">,
   InGroup<DiagGroup<"embedded-directive">>;
@@ -974,6 +974,15 @@ def warn_module_conflict : Warning<
   InGroup<ModuleConflict>;
 
 // C++20 modules
+def err_module_decl_in_header : Error<
+  "module declaration must not come from an #include directive">;
+def err_pp_cond_span_module_decl : Error<
+  "preprocessor conditionals shall not span a module declaration">;
+def err_module_expected_ident : Error<
+  "expected a module name after '%select{module|import}0'">;
+def err_unsupported_module_partition : Error<
+  "module partitions are only supported for C++20 onwards">;
+def err_invalid_module_name : Error<"%0 is an invalid name for a module">;
 def err_header_import_semi_in_macro : Error<
   "semicolon terminating header import declaration cannot be produced "
   "by a macro">;
@@ -985,6 +994,8 @@ def warn_pp_include_angled_in_module_purview : Warning<
   ", which is not usually intended; consider moving that directive before "
   "the module declaration">,
   InGroup<DiagGroup<"include-angled-in-module-purview">>;
+def warn_reserved_module_name : Warning<
+  "%0 is a reserved name for a module">, InGroup<ReservedModuleIdentifier>;
 
 def warn_header_guard : Warning<
   "%0 is used as a header guard here, followed by #define of a different macro">,

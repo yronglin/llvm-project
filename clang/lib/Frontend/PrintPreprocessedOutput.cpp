@@ -760,7 +760,8 @@ void PrintPPOutputPPCallbacks::HandleWhitespaceBeforeTok(const Token &Tok,
   if (Tok.is(tok::eof) ||
       (Tok.isAnnotation() && !Tok.is(tok::annot_header_unit) &&
        !Tok.is(tok::annot_module_begin) && !Tok.is(tok::annot_module_end) &&
-       !Tok.is(tok::annot_repl_input_end) && !Tok.is(tok::annot_embed)))
+       !Tok.is(tok::annot_repl_input_end) && !Tok.is(tok::annot_embed) &&
+       !Tok.is(tok::annot_module_name)))
     return;
 
   // EmittedDirectiveOnThisLine takes priority over RequireSameLine.
@@ -980,6 +981,9 @@ static void PrintPreprocessedTokens(Preprocessor &PP, Token &Tok,
         *Callbacks->OS << static_cast<int>(Byte);
         PrintComma = true;
       }
+    } else if (Tok.is(tok::annot_module_name)) {
+      Tok.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()->print(
+          *Callbacks->OS);
     } else if (Tok.isAnnotation()) {
       // Ignore annotation tokens created by pragmas - the pragmas themselves
       // will be reproduced in the preprocessed output.
