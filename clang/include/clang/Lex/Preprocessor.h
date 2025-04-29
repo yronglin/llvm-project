@@ -131,6 +131,13 @@ enum class EmbedResult {
   Empty = 2,    // Corresponds to __STDC_EMBED_EMPTY__
 };
 
+enum class ModuleNameKind {
+  CPlusPlusModuleDecl,
+  CplusPlusModuleImport,
+  ClangModule,
+  ObjcAtImport
+};
+
 /// Engages in a tight little dance with the lexer to efficiently
 /// preprocess tokens.
 ///
@@ -1741,12 +1748,13 @@ public:
   /// Lex the parameters for an #embed directive, returns nullopt on error.
   std::optional<LexEmbedParametersResult> LexEmbedParameters(Token &Current,
                                                              bool ForHasEmbed);
+  static std::string stringFromModuleIdPath(ModuleIdPath Path);
+  bool LexModuleNameComponent(ModuleNameKind Kind, Token &Tok,
+                              IdentifierLoc &ModuleNameComponent, bool First);
+  bool LexModuleNameInternal(ModuleNameKind Kind, Token &Tok, SmallVectorImpl<IdentifierLoc> &ModuleName, SourceLocation UseLoc);
+  /// Lex a token, forming a header/module-name if possible.
+  bool LexModuleName(ModuleNameKind Kind, Token &Result, SourceLocation UseLoc);
 
-  // bool LexModuleNameComponent(Token &Tok, IdentifierLoc &ModuleNameComponent, bool First, bool IsImport, bool AllowStringLiteral, bool Allow);
-  
-  // /// Lex a token, forming a header/module-name if possible.
-  // bool LexModuleName(Token &Result, SourceLocation UseLoc, bool IsImport);
-  
   bool LexModuleNameContinue(Token &Tok, SourceLocation UseLoc,
                               SmallVectorImpl<IdentifierLoc> &Path,
                               bool IsImport);
@@ -3098,38 +3106,39 @@ class ModuleNameIdentifierLocPath final
     : llvm::TrailingObjects<ModuleNameIdentifierLocPath, IdentifierLoc> {
   friend TrailingObjects;
   unsigned NamedModulePathSize : 16;
-  LLVM_PREFERRED_TYPE(bool) unsigned IsCplusPlusModulesName : 1;
-  LLVM_PREFERRED_TYPE(bool) unsigned IsImported : 1;
+  LLVM_PREFERRED_TYPE(ModuleNameKind) unsigned Kind : 8;
   LLVM_PREFERRED_TYPE(bool) unsigned HasPartition : 1;
-  unsigned : 13;
+  unsigned : 7;
 
   unsigned numTrailingObjects(OverloadToken<IdentifierLoc>) const {
     return NamedModulePathSize;
   }
 
-  ModuleNameIdentifierLocPath(ModuleIdPath Path,
-                              bool CPlusPlusModules, bool IsImported,
+  ModuleNameIdentifierLocPath(ModuleIdPath Path, ModuleNameKind Kind,
                               bool HasPartition)
-      : NamedModulePathSize(Path.size()),
-        IsCplusPlusModulesName(CPlusPlusModules), IsImported(IsImported),
+      : NamedModulePathSize(Path.size()), Kind(static_cast<unsigned>(Kind)),
         HasPartition(HasPartition) {
     (void)llvm::copy(Path, getTrailingObjects<IdentifierLoc>());
   }
 
 public:
   static ModuleNameIdentifierLocPath *
-  Create(Preprocessor &PP, ModuleIdPath Path,
-         bool IsImported);
-  static std::string stringFromPath(ModuleIdPath Path);
-  
-  bool isCPlusPlusModulesName() const { return IsCplusPlusModulesName; }
-  bool isImported() const { return IsImported; }
+  Create(Preprocessor &PP, ModuleIdPath Path, ModuleNameKind Kind);
+
+  ModuleNameKind getKind() const { return static_cast<ModuleNameKind>(Kind); }
+  bool isCPlusPlusModulesName() const {
+    return getKind() == ModuleNameKind::CPlusPlusModuleDecl ||
+           getKind() == ModuleNameKind::CplusPlusModuleImport;
+  }
   bool hasPartition() const { return HasPartition; }
-  
+
   // Flatten the dots in a module name. Unlike Clang's hierarchical module map
   // modules, the dots here are just another character that can appear in a
   // module name.
   StringRef getFlatName() const {
+    if (!isCPlusPlusModulesName()) {
+      llvm::errs() << "FUCK!!!!!!!!!!!! " << Kind << "\n";
+    }
     assert(isCPlusPlusModulesName() && "Get flat name in non-C++ modules");
     return getIdentifierLocs().front().getIdentifierInfo()->getName();
   }
@@ -3144,7 +3153,9 @@ public:
     return getIdentifierLocs().front().getLoc();
   }
   SourceLocation getEndLoc() const {
-    return getIdentifierLocs().back().getLoc();
+    auto &Last = getIdentifierLocs().back();
+    return Last.getLoc().getLocWithOffset(
+        Last.getIdentifierInfo()->getLength());
   }
   SourceRange getRange() const { return {getBeginLoc(), getEndLoc()}; }
 

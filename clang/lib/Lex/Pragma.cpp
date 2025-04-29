@@ -761,47 +761,12 @@ void Preprocessor::HandlePragmaIncludeAlias(Token &Tok) {
   getHeaderSearchInfo().AddIncludeAlias(OriginalSource, ReplaceFileName);
 }
 
-// Lex a component of a module name: either an identifier or a string literal;
-// for components that can be expressed both ways, the two forms are equivalent.
-static bool LexModuleNameComponent(Preprocessor &PP, Token &Tok,
-                                   IdentifierLoc &ModuleNameComponent,
-                                   bool First) {
-  PP.LexUnexpandedToken(Tok);
-  if (Tok.is(tok::string_literal) && !Tok.hasUDSuffix()) {
-    StringLiteralParser Literal(Tok, PP);
-    if (Literal.hadError)
-      return true;
-    ModuleNameComponent = IdentifierLoc(
-        Tok.getLocation(), PP.getIdentifierInfo(Literal.GetString()));
-  } else if (!Tok.isAnnotation() && Tok.getIdentifierInfo()) {
-    ModuleNameComponent =
-        IdentifierLoc(Tok.getLocation(), Tok.getIdentifierInfo());
-  } else {
-    PP.Diag(Tok.getLocation(), diag::err_pp_expected_module_name) << First;
-    return true;
-  }
-  return false;
-}
-
-static bool LexModuleName(Preprocessor &PP, Token &Tok,
-                          llvm::SmallVectorImpl<IdentifierLoc> &ModuleName) {
-  while (true) {
-    IdentifierLoc NameComponent;
-    if (LexModuleNameComponent(PP, Tok, NameComponent, ModuleName.empty()))
-      return true;
-    ModuleName.push_back(NameComponent);
-
-    PP.LexUnexpandedToken(Tok);
-    if (Tok.isNot(tok::period))
-      return false;
-  }
-}
-
 void Preprocessor::HandlePragmaModuleBuild(Token &Tok) {
   SourceLocation Loc = Tok.getLocation();
 
   IdentifierLoc ModuleNameLoc;
-  if (LexModuleNameComponent(*this, Tok, ModuleNameLoc, true))
+  if (LexModuleNameComponent(ModuleNameKind::ClangModule, Tok, ModuleNameLoc,
+                             /*First=*/true))
     return;
   IdentifierInfo *ModuleName = ModuleNameLoc.getIdentifierInfo();
 
@@ -1106,9 +1071,12 @@ struct PragmaDebugHandler : public PragmaHandler {
         PP.Diag(MacroName, diag::warn_pragma_debug_missing_argument)
             << II->getName();
     } else if (II->isStr("module_map")) {
-      llvm::SmallVector<IdentifierLoc, 8> ModuleName;
-      if (LexModuleName(PP, Tok, ModuleName))
+      if (PP.LexModuleName(ModuleNameKind::ClangModule, Tok, Tok.getLocation()))
         return;
+      auto ModuleName =
+          Tok.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()
+              ->getIdentifierLocs();
+      PP.Lex(Tok);
       ModuleMap &MM = PP.getHeaderSearchInfo().getModuleMap();
       Module *M = nullptr;
       for (auto IIAndLoc : ModuleName) {
@@ -1704,10 +1672,11 @@ struct PragmaModuleImportHandler : public PragmaHandler {
     SourceLocation ImportLoc = Tok.getLocation();
 
     // Read the module name.
-    llvm::SmallVector<IdentifierLoc, 8> ModuleName;
-    if (LexModuleName(PP, Tok, ModuleName))
+    if (PP.LexModuleName(ModuleNameKind::ClangModule, Tok, ImportLoc))
       return;
-
+    auto ModuleName = Tok.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()
+                           ->getIdentifierLocs();
+    PP.Lex(Tok);
     if (Tok.isNot(tok::eod))
       PP.Diag(Tok, diag::ext_pp_extra_tokens_at_eol) << "pragma";
 
@@ -1740,9 +1709,11 @@ struct PragmaModuleBeginHandler : public PragmaHandler {
     SourceLocation BeginLoc = Tok.getLocation();
 
     // Read the module name.
-    llvm::SmallVector<IdentifierLoc, 8> ModuleName;
-    if (LexModuleName(PP, Tok, ModuleName))
+    if (PP.LexModuleName(ModuleNameKind::ClangModule, Tok, BeginLoc))
       return;
+    auto ModuleName = Tok.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()
+                          ->getIdentifierLocs();
+    PP.Lex(Tok);
 
     if (Tok.isNot(tok::eod))
       PP.Diag(Tok, diag::ext_pp_extra_tokens_at_eol) << "pragma";
@@ -1833,10 +1804,11 @@ struct PragmaModuleLoadHandler : public PragmaHandler {
     SourceLocation Loc = Tok.getLocation();
 
     // Read the module name.
-    llvm::SmallVector<IdentifierLoc, 8> ModuleName;
-    if (LexModuleName(PP, Tok, ModuleName))
+    if (PP.LexModuleName(ModuleNameKind::ClangModule, Tok, Loc))
       return;
-
+    auto ModuleName = Tok.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()
+                          ->getIdentifierLocs();
+    PP.Lex(Tok);
     if (Tok.isNot(tok::eod))
       PP.Diag(Tok, diag::ext_pp_extra_tokens_at_eol) << "pragma";
 

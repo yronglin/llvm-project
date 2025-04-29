@@ -4090,11 +4090,13 @@ void Preprocessor::HandleCXXImportDirective(Token Import) {
   ImportingCXXNamedModules = true;
 
   Token Tok;
-  if (LexHeaderName(Tok))
-      return;
+  if (LexModuleName(ModuleNameKind::CplusPlusModuleImport, Tok,
+                    ModuleImportLoc))
+    return;
 
-  SmallVector<Token, 4> Suffix{Import};
-  if (Tok.is(tok::header_name)) {
+  SmallVector<Token, 4> Suffix{Import, Tok};
+  switch (Tok.getKind()) {
+  case tok::header_name: {
     Suffix.push_back(Tok);
     // Consume the pp-import-suffix and expand any macros in it now. We'll add
     // it back into the token stream later.
@@ -4149,94 +4151,31 @@ void Preprocessor::HandleCXXImportDirective(Token Import) {
     }
     return;
   }
-
-  // Importing partition.
-  bool IsPartition = false;
-  SourceLocation UseLoc = Import.getLocation();
-  if (Tok.is(tok::colon)) {
-    IsPartition = true;
-    UseLoc = Tok.getLocation();
-    Lex(Tok);
+  case tok::annot_module_name: {
+    auto Path = Tok.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()
+                    ->getIdentifierLocs();
+    // We don't/shouldn't load the standard c++20 modules when preprocessing. so
+    // the imported module is nullptr.
+    if (Callbacks)
+      Callbacks->moduleImport(Import.getLocation(), Path, /*Imported=*/nullptr);
+    break;
   }
-
-  SmallVector<IdentifierLoc, 2> Path;
-  if (LexModuleNameContinue(Tok, UseLoc, Path,
-                            /*IsImport=*/true)) {
-    if (Tok.isNot(tok::eod))
-      DiscardUntilEndOfDirective();
-    return;
+  default:
+    break;
   }
-
-  std::string FlatModuleName;
-  if (IsPartition)
-    FlatModuleName = llvm::Twine(ModuleDeclState.isNamedModule()
-                                     ? ModuleDeclState.getPrimaryName()
-                                     : "")
-                         .concat(":")
-                         .str();
-  FlatModuleName += ModuleNameIdentifierLocPath::stringFromPath(Path);
-  Path.clear();
-  Path.emplace_back(UseLoc, getIdentifierInfo(FlatModuleName));
-  auto *Data =
-      ModuleNameIdentifierLocPath::Create(*this, Path, /*IsImported=*/true);
-  Suffix.emplace_back();
-  Suffix.back().setKind(tok::annot_module_name);
-  Suffix.back().setAnnotationRange(Data->getRange());
-  Suffix.back().setAnnotationValue(Data);
-  Suffix.push_back(Tok);
 
   // Consume the pp-import-suffix and expand any macros in it now, if we're not
   // at the semicolon already.
-  if (Tok.isNot(tok::semi))
+  if (!Tok.isOneOf(tok::semi, tok::eod))
     CollectPpImportSuffix(Suffix);
 
   if (Suffix.back().isNot(tok::eod))
     CheckEndOfDirective(Import.getIdentifierInfo()->getName());
 
-  // We don't/shouldn't load the standard c++20 modules when preprocessing. so
-  // the imported module is nullptr.
-  if (Callbacks)
-    Callbacks->moduleImport(Import.getLocation(), Path, /*Imported=*/nullptr);
   auto ToksCopy = std::make_unique<Token[]>(Suffix.size());
   std::copy(Suffix.begin(), Suffix.end(), ToksCopy.get());
   EnterTokenStream(std::move(ToksCopy), Suffix.size(),
                    /*DisableMacroExpansion*/ true, /*IsReinject*/ false);
-}
-
-/// Tests whether the given identifier is reserved as a module name and
-/// diagnoses if it is. Returns true if a diagnostic is emitted and false
-/// otherwise.
-bool Preprocessor::DiagReservedModuleName(const IdentifierLoc &IdLoc) {
-  enum {
-    Valid = -1,
-    Invalid = 0,
-    Reserved = 1,
-  } Reason = Valid;
-
-  const auto *II = IdLoc.getIdentifierInfo();
-  auto Loc = IdLoc.getLoc();
-  if (II->isStr("module") || II->isStr("import"))
-    Reason = Invalid;
-  else if (II->isReserved(getLangOpts()) !=
-           ReservedIdentifierStatus::NotReserved)
-    Reason = Reserved;
-
-  // If the identifier is reserved (not invalid) but is in a system header,
-  // we do not diagnose (because we expect system headers to use reserved
-  // identifiers).
-  if (Reason == Reserved && getSourceManager().isInSystemHeader(Loc))
-    Reason = Valid;
-
-  switch (Reason) {
-  case Valid:
-    return false;
-  case Invalid:
-    return Diag(Loc, diag::err_invalid_module_name) << II;
-  case Reserved:
-    Diag(Loc, diag::warn_reserved_module_name) << II;
-    return false;
-  }
-  llvm_unreachable("fell off a fully covered switch");
 }
 
 void Preprocessor::HandleCXXModuleDirective(Token Module) {
@@ -4250,87 +4189,13 @@ void Preprocessor::HandleCXXModuleDirective(Token Module) {
 
   Token Tok;
   SmallVector<Token, 4> Suffix{Module};
-  SmallVector<IdentifierLoc, 2> ModulePath, PartitionPath;
-  LexUnexpandedToken(Tok);
+  if (LexModuleName(ModuleNameKind::CPlusPlusModuleDecl, Tok, ModuleDeclLoc))
+    return;
 
   switch (Tok.getKind()) {
-  case tok::identifier: {
-    if (LexModuleNameContinue(Tok, Module.getLocation(), ModulePath,
-                              /*IsImport=*/false)) {
-      if (Tok.isNot(tok::eod))
-        DiscardUntilEndOfDirective();
-      return;
-    }
-
-    if (Tok.is(tok::colon)) {
-      LexUnexpandedToken(Tok);
-      if (LexModuleNameContinue(Tok, Module.getLocation(), PartitionPath,
-                                /*IsImport=*/false)) {
-        if (Tok.isNot(tok::eod))
-          DiscardUntilEndOfDirective();
-        return;
-      }
-    }
-
-    // Put the last token back to stream, it's might be a macro name, so we need
-    // enable macro expansion.
-    //
-    // #define ATTRS [[]]
-    // module M ATTRS;
-    auto LastTok = std::make_unique<Token[]>(1);
-    LastTok[0] = Tok;
-    LastTok[0].clearFlag(Token::DisableExpand);
-    EnterTokenStream(std::move(LastTok), 1, /*DisableMacroExpansion=*/false,
-                     /*IsReinject=*/false);
-    // Re-consume next token.
-    Lex(Tok);
-
-    // C++23 [module.unit]p1: ... The identifiers module and import shall not
-    // appear as identifiers in a module-name or module-partition. All
-    // module-names either beginning with an identifier consisting of std
-    // followed by zero or more digits or containing a reserved identifier
-    // ([lex.name]) are reserved and shall not be specified in a
-    // module-declaration; no diagnostic is required.
-
-    // Test the first part of the path to see if it's std[0-9]+ but allow the
-    // name in a system header.
-    StringRef FirstComponentName = ModulePath[0].getIdentifierInfo()->getName();
-    if (!getSourceManager().isInSystemHeader(ModulePath[0].getLoc()) &&
-        (FirstComponentName == "std" ||
-         (FirstComponentName.starts_with("std") &&
-          llvm::all_of(FirstComponentName.drop_front(3), &llvm::isDigit))))
-      Diag(ModulePath[0].getLoc(), diag::warn_reserved_module_name)
-          << ModulePath[0].getIdentifierInfo();
-
-    // Then test all of the components in the path to see if any of them are
-    // using another kind of reserved or invalid identifier.
-    for (auto Part : ModulePath) {
-      if (DiagReservedModuleName(Part)) {
-        DiscardUntilEndOfDirective();
-        return;
-      }
-    }
-
-    std::string FlatModuleName =
-        ModuleNameIdentifierLocPath::stringFromPath(ModulePath);
-    if (!PartitionPath.empty())
-      FlatModuleName += llvm::Twine(":")
-                            .concat(ModuleNameIdentifierLocPath::stringFromPath(
-                                PartitionPath))
-                            .str();
-
-    ModulePath.clear();
-    ModulePath.emplace_back(Module.getLocation(),
-                            getIdentifierInfo(FlatModuleName));
-    auto *Data = ModuleNameIdentifierLocPath::Create(*this, ModulePath,
-                                                     /*IsImported=*/false);
-    Suffix.emplace_back();
-    Suffix.back().setKind(tok::annot_module_name);
-    Suffix.back().setAnnotationRange(Data->getRange());
-    Suffix.back().setAnnotationValue(Data);
+  case tok::annot_module_name:
+    Suffix.push_back(Tok);
     break;
-  }
-
   // Declare a private module fragment.
   //
   // module :private;
@@ -4338,6 +4203,7 @@ void Preprocessor::HandleCXXModuleDirective(Token Module) {
     // FIXME: Report an error when the token after ':' is not kw_private.
     Suffix.push_back(Tok);
     LexUnexpandedToken(Tok);
+    Suffix.push_back(Tok);
     if (Tok.isNot(tok::kw_private))
       Diag(Suffix.back().getLocation(), diag::err_module_expected_ident)
           << /*IsImport=*/false;
@@ -4350,14 +4216,13 @@ void Preprocessor::HandleCXXModuleDirective(Token Module) {
     Suffix.push_back(Tok);
     break;
   default:
-    return;
+    break;;
   }
 
   // Consume the pp-import-suffix and expand any macros in it now, if we're not
   // at the semicolon already.
   SourceLocation End = Tok.getLocation();
-  Suffix.push_back(Tok);
-  if (Tok.isNot(tok::semi)) {
+  if (!Tok.isOneOf(tok::semi, tok::eod)) {
     CollectPpImportSuffix(Suffix);
     End = Suffix.back().getLocation();
   }

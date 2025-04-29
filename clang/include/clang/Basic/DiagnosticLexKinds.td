@@ -729,7 +729,7 @@ def warn_pragma_debug_unable_to_find_module : Warning<
   "unable to find module '%0'">, InGroup<IgnoredPragmas>;
 // #pragma module
 def err_pp_expected_module_name : Error<
-  "expected %select{identifier after '.' in |}0module name">;
+  "expected %select{identifier after '.' in |}0module name%select{| or header name}0">;
 def err_pp_module_begin_wrong_module : Error<
   "must specify '-fmodule-name=%0' to enter %select{|submodule of }1"
   "this module%select{ (current module is %3)|}2">;

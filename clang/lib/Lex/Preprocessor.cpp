@@ -863,9 +863,11 @@ bool Preprocessor::HandleIdentifier(Token &Identifier) {
 
 void Preprocessor::ModuleDeclSeq::handleModuleName(
     ModuleNameIdentifierLocPath *Data) {
-  if (isModuleCandidate() && Data)
-    Name = Data->getFlatName();
-  else if (!isNamedModule())
+  if (isModuleCandidate() && Data) {
+    Name.clear();
+    llvm::raw_string_ostream OS(Name);
+    Data->print(OS);
+  } else if (!isNamedModule())
     reset();
 }
 
@@ -1083,7 +1085,7 @@ bool Preprocessor::LexHeaderName(Token &FilenameTok, bool AllowMacroExpansion) {
 
 ModuleNameIdentifierLocPath *
 ModuleNameIdentifierLocPath::Create(Preprocessor &PP, ModuleIdPath Path,
-                                    bool IsImported) {
+                                    ModuleNameKind Kind) {
   assert(!Path.empty() && "expect at least one identifier in a module name");
   assert(Path.size() < std::numeric_limits<uint16_t>::max() &&
          "Path size too large");
@@ -1091,15 +1093,14 @@ ModuleNameIdentifierLocPath::Create(Preprocessor &PP, ModuleIdPath Path,
   void *Mem = PP.getPreprocessorAllocator().Allocate(
       totalSizeToAlloc<IdentifierLoc>(Path.size()),
       alignof(ModuleNameIdentifierLocPath));
-  return new (Mem) ModuleNameIdentifierLocPath(
-      Path, PP.getLangOpts().CPlusPlusModules, IsImported, HasPartition);
+  return new (Mem) ModuleNameIdentifierLocPath(Path, Kind, HasPartition);
 }
 
 // We represent the primary and partition names as 'Paths' which are sections
 // of the hierarchical access path for a clang module.  However for C++20
 // the periods in a name are just another character, and we will need to
 // flatten them into a string.
-std::string ModuleNameIdentifierLocPath::stringFromPath(ModuleIdPath Path) {
+std::string Preprocessor::stringFromModuleIdPath(ModuleIdPath Path) {
   std::string Name;
   if (Path.empty())
     return Name;
@@ -1114,7 +1115,7 @@ std::string ModuleNameIdentifierLocPath::stringFromPath(ModuleIdPath Path) {
 
 StringRef ModuleNameIdentifierLocPath::getFlatNameAsWritten() const {
   assert(isCPlusPlusModulesName() && "Get flat name in non-C++ modules");
-  if (!isImported() || !hasPartition())
+  if (getKind() == ModuleNameKind::CPlusPlusModuleDecl || !hasPartition())
     return getFlatName();
 
   StringRef Name = getFlatName();
@@ -1128,7 +1129,260 @@ void ModuleNameIdentifierLocPath::print(llvm::raw_ostream &OS) const {
   if (isCPlusPlusModulesName())
     OS << getFlatNameAsWritten();
   else
-    OS << stringFromPath(getIdentifierLocs());
+    OS << Preprocessor::stringFromModuleIdPath(getIdentifierLocs());
+}
+
+/// Tests whether the given identifier is reserved as a module name and
+/// diagnoses if it is. Returns true if a diagnostic is emitted and false
+/// otherwise.
+bool Preprocessor::DiagReservedModuleName(const IdentifierLoc &IdLoc) {
+  enum {
+    Valid = -1,
+    Invalid = 0,
+    Reserved = 1,
+  } Reason = Valid;
+
+  const auto *II = IdLoc.getIdentifierInfo();
+  auto Loc = IdLoc.getLoc();
+  if (II->isStr("module") || II->isStr("import"))
+    Reason = Invalid;
+  else if (II->isReserved(getLangOpts()) !=
+           ReservedIdentifierStatus::NotReserved)
+    Reason = Reserved;
+
+  // If the identifier is reserved (not invalid) but is in a system header,
+  // we do not diagnose (because we expect system headers to use reserved
+  // identifiers).
+  if (Reason == Reserved && getSourceManager().isInSystemHeader(Loc))
+    Reason = Valid;
+
+  switch (Reason) {
+  case Valid:
+    return false;
+  case Invalid:
+    return Diag(Loc, diag::err_invalid_module_name) << II;
+  case Reserved:
+    Diag(Loc, diag::warn_reserved_module_name) << II;
+    return false;
+  }
+  llvm_unreachable("fell off a fully covered switch");
+}
+
+bool Preprocessor::LexModuleNameComponent(ModuleNameKind Kind, Token &Tok,
+                                          IdentifierLoc &ModuleNameComponent,
+                                          bool First) {
+  switch (Kind) {
+  case ModuleNameKind::CPlusPlusModuleDecl:
+    LexUnexpandedToken(Tok);
+    if (Tok.is(tok::identifier)) {
+      ModuleNameComponent =
+          IdentifierLoc(Tok.getLocation(), Tok.getIdentifierInfo());
+      return false;
+    }
+    if (First) {
+      if (Tok.is(tok::colon)) {
+        auto NextTok = peekNextPPToken().value_or(Token{});
+        if (NextTok.is(tok::raw_identifier) &&
+            LookUpIdentifierInfo(NextTok)->getTokenID() == tok::kw_private)
+          return false;
+      } else if (Tok.is(tok::semi)) {
+        return false;
+      }
+    }
+    Diag(Tok.getLocation(), diag::err_pp_expected_module_name)
+        << First << /*CplusPlusModuleImport*/ false;
+    return true;
+  case ModuleNameKind::CplusPlusModuleImport:
+    if (First) {
+      if (LexHeaderName(Tok))
+        return true;
+      if (Tok.is(tok::header_name))
+        return false;
+      if (Tok.is(tok::colon)) {
+        auto NextTok = peekNextPPToken().value_or(Token{});
+        if (NextTok.is(tok::raw_identifier) &&
+            LookUpIdentifierInfo(NextTok)->getTokenID() == tok::identifier)
+          return false;
+      }
+    } else {
+      Lex(Tok);
+    }
+    if (Tok.is(tok::identifier)) {
+      ModuleNameComponent =
+          IdentifierLoc(Tok.getLocation(), Tok.getIdentifierInfo());
+      return false;
+    }
+    Diag(Tok.getLocation(), diag::err_pp_expected_module_name)
+        << First << /*CplusPlusModuleImport*/ true;
+    return true;
+  case ModuleNameKind::ObjcAtImport:
+    Lex(Tok);
+    if (Tok.is(tok::identifier)) {
+      ModuleNameComponent =
+          IdentifierLoc(Tok.getLocation(), Tok.getIdentifierInfo());
+      return false;
+    }
+    Diag(Tok.getLocation(), diag::err_pp_expected_module_name)
+        << First << /*CplusPlusModuleImport*/ true;
+    return true;
+  case ModuleNameKind::ClangModule:
+    LexUnexpandedToken(Tok);
+    if (Tok.is(tok::string_literal) && !Tok.hasUDSuffix()) {
+      StringLiteralParser Literal(Tok, *this);
+      if (Literal.hadError)
+        return true;
+      ModuleNameComponent = IdentifierLoc(
+          Tok.getLocation(), getIdentifierInfo(Literal.GetString()));
+    } else if (!Tok.isAnnotation() && Tok.getIdentifierInfo()) {
+      ModuleNameComponent =
+          IdentifierLoc(Tok.getLocation(), Tok.getIdentifierInfo());
+    } else {
+      Diag(Tok.getLocation(), diag::err_pp_expected_module_name)
+          << First << /*CplusPlusModuleImport*/ false;
+      return true;
+    }
+    return false;
+  }
+}
+
+bool Preprocessor::LexModuleNameInternal(
+    ModuleNameKind Kind, Token &Tok, SmallVectorImpl<IdentifierLoc> &ModuleName,
+    SourceLocation UseLoc) {
+  while (true) {
+    bool First = ModuleName.empty();
+    IdentifierLoc NameComponent;
+    if (LexModuleNameComponent(Kind, Tok, NameComponent, First)) {
+      if (Tok.is(tok::code_completion)) {
+        CurLexer->cutOffLexing();
+        Tok.setKind(tok::eof);
+        this->getCodeCompletionHandler()->CodeCompleteModuleImport(UseLoc,
+                                                                   ModuleName);
+      }
+      return true;
+    }
+
+    switch (Kind) {
+    case ModuleNameKind::CplusPlusModuleImport:
+      if (Tok.isOneOf(tok::header_name, tok::colon))
+        return false;
+      [[fallthrough]];
+    case ModuleNameKind::ObjcAtImport:
+      ModuleName.push_back(NameComponent);
+      Lex(Tok);
+      break;
+    case ModuleNameKind::CPlusPlusModuleDecl:
+      if (Tok.isOneOf(tok::colon, tok::semi))
+        return false;
+      [[fallthrough]];
+    case ModuleNameKind::ClangModule:
+      ModuleName.push_back(NameComponent);
+      LexUnexpandedToken(Tok);
+      break;
+    }
+    if (Tok.isNot(tok::period))
+      break;
+  }
+  assert(!ModuleName.empty() && "Module name should not empty");
+  return false;
+}
+
+bool Preprocessor::LexModuleName(ModuleNameKind Kind, Token &Tok,
+                                 SourceLocation UseLoc) {
+  SmallVector<IdentifierLoc, 2> ModuleName;
+  switch (Kind) {
+  case ModuleNameKind::CPlusPlusModuleDecl: {
+    if (LexModuleNameInternal(Kind, Tok, ModuleName, UseLoc))
+      return true;
+    if (ModuleName.empty() && Tok.isOneOf(tok::colon, tok::semi))
+      return false;
+    // C++23 [module.unit]p1: ... The identifiers module and import shall not
+    // appear as identifiers in a module-name or module-partition. All
+    // module-names either beginning with an identifier consisting of std
+    // followed by zero or more digits or containing a reserved identifier
+    // ([lex.name]) are reserved and shall not be specified in a
+    // module-declaration; no diagnostic is required.
+
+    // Test the first part of the path to see if it's std[0-9]+ but allow the
+    // name in a system header.
+    StringRef FirstComponentName = ModuleName[0].getIdentifierInfo()->getName();
+    if (!getSourceManager().isInSystemHeader(ModuleName[0].getLoc()) &&
+        (FirstComponentName == "std" ||
+         (FirstComponentName.starts_with("std") &&
+          llvm::all_of(FirstComponentName.drop_front(3), &isDigit))))
+      Diag(ModuleName[0].getLoc(), diag::warn_reserved_module_name)
+          << ModuleName[0].getIdentifierInfo();
+
+    // Then test all of the components in the path to see if any of them are
+    // using another kind of reserved or invalid identifier.
+    for (auto Part : ModuleName) {
+      if (DiagReservedModuleName(Part)) {
+        DiscardUntilEndOfDirective();
+        return true;
+      }
+    }
+    std::string FlatModuleName = stringFromModuleIdPath(ModuleName);
+    SourceLocation FirstPathLoc = ModuleName[0].getLoc();
+    if (Tok.is(tok::colon)) {
+      SmallVector<IdentifierLoc, 2> Partition;
+      if (LexModuleNameInternal(Kind, Tok, Partition, UseLoc))
+        return true;
+      FlatModuleName += ':';
+      FlatModuleName += stringFromModuleIdPath(Partition);
+    }
+    ModuleName.clear();
+    ModuleName.emplace_back(FirstPathLoc, getIdentifierInfo(FlatModuleName));
+    break;
+  }
+  case ModuleNameKind::CplusPlusModuleImport: {
+    if (LexModuleNameInternal(Kind, Tok, ModuleName, UseLoc))
+      return true;
+    if (Tok.is(tok::header_name))
+      return false;
+    std::string FlatModuleName;
+    SourceLocation FirstPathLoc;
+    // Importing module partition.
+    if (ModuleName.empty() && Tok.is(tok::colon)) {
+      UseLoc = Tok.getLocation();
+      if (LexModuleNameInternal(Kind, Tok, ModuleName, UseLoc))
+        return true;
+      FlatModuleName = llvm::Twine(ModuleDeclState.isNamedModule()
+                                       ? ModuleDeclState.getPrimaryName()
+                                       : "")
+                           .concat(":")
+                           .concat(stringFromModuleIdPath(ModuleName))
+                           .str();
+      FirstPathLoc = UseLoc;
+    } else {
+      FlatModuleName = stringFromModuleIdPath(ModuleName);
+      FirstPathLoc = ModuleName[0].getLoc();
+    }
+    ModuleName.clear();
+    ModuleName.emplace_back(FirstPathLoc, getIdentifierInfo(FlatModuleName));
+    break;
+  }
+  case ModuleNameKind::ObjcAtImport:
+  case ModuleNameKind::ClangModule:
+    if (LexModuleNameInternal(Kind, Tok, ModuleName, UseLoc))
+      return true;
+    break;
+  }
+
+  // Put the last token back to stream, it's might be a macro name, so we need
+  // enable macro expansion.
+  //
+  // #define ATTRS [[]]
+  // module M ATTRS;
+  auto LastTok = std::make_unique<Token[]>(1);
+  LastTok[0] = Tok;
+  LastTok[0].clearFlag(Token::DisableExpand);
+  EnterTokenStream(std::move(LastTok), 1, /*DisableMacroExpansion=*/false,
+                   /*IsReinject=*/false);
+  auto *Data = ModuleNameIdentifierLocPath::Create(*this, ModuleName, Kind);
+  Tok.startToken();
+  Tok.setKind(tok::annot_module_name);
+  Tok.setAnnotationRange(Data->getRange());
+  Tok.setAnnotationValue(Data);
+  return false;
 }
 
 /// P1857R3: Modules Dependency Discovery
@@ -1278,8 +1532,6 @@ bool Preprocessor::LexAfterModuleImport(Token &Result) {
   // Figure out what kind of lexer we actually have.
   recomputeCurLexerKind();
 
-  Lex(Result);
-
   // Allocate a holding buffer for a sequence of tokens and introduce it into
   // the token stream.
   auto EnterTokens = [this](ArrayRef<Token> Toks) {
@@ -1290,21 +1542,25 @@ bool Preprocessor::LexAfterModuleImport(Token &Result) {
   };
 
   SmallVector<Token, 32> Suffix;
-  SmallVector<IdentifierLoc, 2> NamedModuleImportPath;
-  if (LexModuleNameContinue(Result, ModuleImportLoc, NamedModuleImportPath,
-                            /*IsImport=*/true)) {
+  if (LexModuleName(IsAtImport ? ModuleNameKind::ObjcAtImport
+                               : ModuleNameKind::ClangModule,
+                    Result, ModuleImportLoc)) {
+    Suffix.push_back(Result);
     CollectPpImportSuffix(Suffix);
     EnterTokens(Suffix);
     return false;
   }
 
-  auto *Data =
-      ModuleNameIdentifierLocPath::Create(*this, NamedModuleImportPath, /*IsImported=*/true);
-  Suffix.emplace_back();
-  Suffix.back().setKind(tok::annot_module_name);
-  Suffix.back().setAnnotationRange(Data->getRange());
-  Suffix.back().setAnnotationValue(Data);
   Suffix.push_back(Result);
+  if (Result.isNot(tok::annot_module_name)) {
+    CollectPpImportSuffix(Suffix);
+    EnterTokens(Suffix);
+    return false;
+  }
+
+  auto NamedModuleImportPath =
+      Result.getAnnotationValueAs<ModuleNameIdentifierLocPath *>()
+          ->getIdentifierLocs();
 
   // Consume the pp-import-suffix and expand any macros in it now, if we're not
   // at the semicolon already.

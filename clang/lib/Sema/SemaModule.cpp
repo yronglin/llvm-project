@@ -496,8 +496,9 @@ DeclResult Sema::ActOnModuleImport(SourceLocation StartLoc,
 
   // For a C++20 module name, flatten into a single identifier with the source
   // location of the first component.
-  StringRef ModuleName =
-      getLangOpts().CPlusPlusModules ? Path->getFlatName() : StringRef{};
+  StringRef ModuleName = getLangOpts().CPlusPlusModules && !getLangOpts().ObjC
+                             ? Path->getFlatName()
+                             : StringRef{};
 
   // Diagnose self-import before attempting a load.
   // [module.import]/9
