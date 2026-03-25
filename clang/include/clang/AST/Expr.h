@@ -619,6 +619,10 @@ public:
     /// Likewise, INT_MAX + 1 can be folded to INT_MIN, but has UB.
     bool HasUndefinedBehavior = false;
 
+    /// Whether the evaluation failed due to a thrown exception that was
+    /// not caught within the evaluated expression.
+    bool HasThrownException = false;
+
     /// Diag - If this is non-null, it will be filled in with a stack of notes
     /// indicating why evaluation failed (or why it failed to produce a constant
     /// expression).

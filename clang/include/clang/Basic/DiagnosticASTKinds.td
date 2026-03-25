@@ -431,6 +431,16 @@ def warn_is_constant_evaluated_always_true_constexpr : Warning<
   "'%0' will always evaluate to 'true' in a manifestly constant-evaluated expression">,
   InGroup<DiagGroup<"constant-evaluated">>;
 
+def note_constexpr_uncaught_exception : Note<
+  "uncaught exception of type %0 in constant evaluation">;
+def note_constexpr_rethrow_no_exception : Note<
+  "'throw;' with no current exception">;
+def note_constexpr_exception_enot_matched : Note<
+  "exception of type %0 is no caught">;
+def note_constexpr_throw : Note<
+  "exception throwing is not permitted in "
+  "constant evaluation until C++26">;
+
 def err_invalid_is_within_lifetime : Note<
   "'%0' cannot be called with "
   "%select{a null pointer|a one-past-the-end pointer|"

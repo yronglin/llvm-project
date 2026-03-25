@@ -706,6 +706,8 @@ namespace {
     bool hasSideEffect() {
       return T.isDestructedType();
     }
+
+    bool isFullyConstructed(EvalInfo &Info) const;
   };
 
   /// A reference to an object whose construction we are currently evaluating.
@@ -913,6 +915,16 @@ namespace {
     /// The current array initialization index, if we're performing array
     /// initialization.
     uint64_t ArrayInitIndex = -1;
+
+    /// The in-flight exception during constant evaluation.
+    /// Set when a throw expression is evaluated; consumed by a matching catch. 
+    struct ThrownExceptionInfo {
+      APValue Value;
+      QualType Type;
+      SourceLocation ThrowLoc;
+    };
+
+    std::optional<ThrownExceptionInfo> ThrownException;
 
     EvalInfo(const ASTContext &C, Expr::EvalStatus &S, EvaluationMode Mode)
         : State(const_cast<ASTContext &>(C), S), CurrentCall(nullptr),
@@ -1233,6 +1245,22 @@ namespace {
       OldStackSize = std::numeric_limits<unsigned>::max();
       return OK;
     }
+
+    /// Perform stack unwinding for exception propagation.
+    /// Destorys only fully-constructed objects in this scope; objects
+    /// whose construction was interrupted by the throw are skipped.
+    void unwindForException() {
+      assert(OldStackSize <= Info.CleanupStack.size());
+      for (unsigned I = Info.CleanupStack.size(); I > OldStackSize; --I) {
+        Cleanup &C = Info.CleanupStack[I - 1];
+        if (C.isDestroyedAtEndOf(Kind) && C.isFullyConstructed(Info))
+          C.endLifetime(Info, /*RunDestructors=*/true);
+      }
+      Info.CleanupStack.erase(Info.CleanupStack.begin() + OldStackSize,
+                              Info.CleanupStack.end());
+      OldStackSize = std::numeric_limits<unsigned>::max();
+    }
+
     ~ScopeRAII() {
       if (OldStackSize != std::numeric_limits<unsigned>::max())
         destroy(false);
@@ -1272,6 +1300,15 @@ namespace {
   typedef ScopeRAII<ScopeKind::Block> BlockScopeRAII;
   typedef ScopeRAII<ScopeKind::FullExpression> FullExpressionRAII;
   typedef ScopeRAII<ScopeKind::Call> CallScopeRAII;
+} // namespace
+
+bool Cleanup::isFullyConstructed(EvalInfo &Info) const {
+  APValue *V = Value.getPointer();
+  if (!V || V->isAbsent())
+    return false;
+  auto Phase = Info.isEvaluatingCtorDtor(Base, {});
+  return Phase == ConstructionPhase::None ||
+         Phase == ConstructionPhase::AfterFields;
 }
 
 bool SubobjectDesignator::checkSubobject(EvalInfo &Info, const Expr *E,
@@ -5504,7 +5541,9 @@ enum EvalStmtResult {
   /// Hit a 'break' statement.
   ESR_Break,
   /// Still scanning for 'case' or 'default' statement.
-  ESR_CaseNotFound
+  ESR_CaseNotFound,
+  /// Hit a 'throw' statement.
+  ESR_Threw,
 };
 }
 /// Evaluates the initializer of a reference.
@@ -5651,6 +5690,9 @@ struct TempVersionRAII {
 static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
                                    const Stmt *S,
                                    const SwitchCase *SC = nullptr);
+static EvalStmtResult EvaluateTryStmt(StmtResult &Result, EvalInfo &Info,
+                                      const CXXTryStmt *S,
+                                      const SwitchCase *SC = nullptr);
 
 /// Helper to implement named break/continue. Returns 'true' if the evaluation
 /// result should be propagated up. Otherwise, it sets the evaluation result
@@ -5697,6 +5739,10 @@ static EvalStmtResult EvaluateLoopBody(StmtResult &Result, EvalInfo &Info,
   BlockScopeRAII Scope(Info);
 
   EvalStmtResult ESR = EvaluateStmt(Result, Info, Body, Case);
+  if (ESR == ESR_Threw) {
+    Scope.unwindForException();
+    return ESR;
+  }
   if (ESR != ESR_Failed && ESR != ESR_CaseNotFound && !Scope.destroy())
     ESR = ESR_Failed;
 
@@ -5714,7 +5760,9 @@ static EvalStmtResult EvaluateSwitch(StmtResult &Result, EvalInfo &Info,
     if (const Stmt *Init = SS->getInit()) {
       EvalStmtResult ESR = EvaluateStmt(Result, Info, Init);
       if (ESR != ESR_Succeeded) {
-        if (ESR != ESR_Failed && !Scope.destroy())
+        if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
           ESR = ESR_Failed;
         return ESR;
       }
@@ -5767,7 +5815,9 @@ static EvalStmtResult EvaluateSwitch(StmtResult &Result, EvalInfo &Info,
 
   // Search the switch body for the switch case and evaluate it from there.
   EvalStmtResult ESR = EvaluateStmt(Result, Info, SS->getBody(), Found);
-  if (ESR != ESR_Failed && ESR != ESR_CaseNotFound && !Scope.destroy())
+  if (ESR == ESR_Threw)
+    Scope.unwindForException();
+  else if (ESR != ESR_Failed && ESR != ESR_CaseNotFound && !Scope.destroy())
     return ESR_Failed;
   if (ShouldPropagateBreakContinue(Info, SS, /*Scopes=*/{}, ESR))
     return ESR;
@@ -5779,6 +5829,7 @@ static EvalStmtResult EvaluateSwitch(StmtResult &Result, EvalInfo &Info,
   case ESR_Continue:
   case ESR_Failed:
   case ESR_Returned:
+  case ESR_Threw:
     return ESR;
   case ESR_CaseNotFound:
     // This can only happen if the switch case is nested within a statement
@@ -5802,6 +5853,71 @@ static bool CheckLocalVariableDeclaration(EvalInfo &Info, const VarDecl *VD) {
     return false;
   }
   return true;
+}
+
+static bool handleMatchesException(EvalInfo &Info, const CXXCatchStmt *Handler,
+                                   QualType ExceptionType) {
+  QualType CaughtType = Handler->getCaughtType();
+
+  // The catch(...) matches everything.
+  if (CaughtType.isNull())
+    return true;
+
+  const ASTContext &TheContext = Info.Ctx;
+
+  QualType CanException =
+      TheContext.getCanonicalType(ExceptionType).getUnqualifiedType();
+  QualType CanCaught = TheContext.getCanonicalType(CaughtType);
+
+  if (CaughtType->getAs<ReferenceType>())
+    CanCaught = TheContext.getCanonicalType(CaughtType);
+
+  if (CanException == CanCaught)
+    return true;
+
+  if (CanException->isRecordType() && CanCaught->isRecordType()) {
+    const CXXRecordDecl *ExceptionRD = CanException->getAsCXXRecordDecl();
+    const CXXRecordDecl *CaughtRD = CanCaught->getAsCXXRecordDecl();
+    if (ExceptionRD && CaughtRD && ExceptionRD->isDerivedFrom(CaughtRD))
+      return true;
+  }
+
+  return false;
+}
+
+static EvalStmtResult EvaluateTryStmt(StmtResult &Result, EvalInfo &Info,
+                                      const CXXTryStmt *S,
+                                      const SwitchCase *SC) {
+  EvalStmtResult ESR = EvaluateStmt(Result, Info, S->getTryBlock(), SC);
+  if (ESR != ESR_Threw)
+    return ESR;
+
+  assert(Info.ThrownException && "ESR_Threw but no exception in flight");
+
+  for (unsigned I = 0, E = S->getNumHandlers(); I != E; ++I) {
+    const CXXCatchStmt *Handler = S->getHandler(I);
+
+    if (!handleMatchesException(Info, Handler, Info.ThrownException->Type))
+      continue;
+    if (const VarDecl *VD = Handler->getExceptionDecl()) {
+      BlockScopeRAII CatchScope(Info);
+
+      LValue VarLV;
+      APValue &ExceptionVar = Info.CurrentCall->createTemporary(
+          VD, VD->getType(), ScopeKind::Block, VarLV);
+      ExceptionVar = std::move(Info.ThrownException->Value);
+      Info.ThrownException.reset();
+
+      ESR = EvaluateStmt(Result, Info, Handler->getHandlerBlock());
+      if (ESR != ESR_Failed && !CatchScope.destroy())
+        return ESR_Failed;
+      return ESR;
+    }
+    Info.ThrownException.reset();
+    return EvaluateStmt(Result, Info, Handler->getHandlerBlock(), SC);
+  }
+
+  return ESR_Threw;
 }
 
 // Evaluate a statement.
@@ -5948,8 +6064,11 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
         // FIXME: Do we need the FullExpressionRAII object here?
         // VisitExprWithCleanups should create one when necessary.
         FullExpressionRAII Scope(Info);
-        if (!EvaluateIgnoredValue(Info, E) || !Scope.destroy())
+        if (!EvaluateIgnoredValue(Info, E) || !Scope.destroy()) {
+          if (Info.ThrownException)
+            return ESR_Threw;
           return ESR_Failed;
+        }
       }
       return ESR_Succeeded;
     }
@@ -5969,8 +6088,13 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
       // Each declaration initialization is its own full-expression.
       FullExpressionRAII Scope(Info);
       if (!EvaluateDecl(Info, D, /*EvaluateConditionDecl=*/true) &&
-          !Info.noteFailure())
+          !Info.noteFailure()) {
+        if (Info.ThrownException) {
+          Scope.unwindForException();
+          return ESR_Threw;
+        }
         return ESR_Failed;
+      }
       if (!Scope.destroy())
         return ESR_Failed;
     }
@@ -5985,11 +6109,15 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
       // We know we returned, but we don't know what the value is.
       return ESR_Failed;
     }
-    if (RetExpr &&
-        !(Result.Slot
-              ? EvaluateInPlace(Result.Value, Info, *Result.Slot, RetExpr)
-              : Evaluate(Result.Value, Info, RetExpr)))
+    if (RetExpr && !(Result.Slot ? EvaluateInPlace(Result.Value, Info,
+                                                   *Result.Slot, RetExpr)
+                                 : Evaluate(Result.Value, Info, RetExpr))) {
+      if (Info.ThrownException) {
+          Scope.unwindForException();
+          return ESR_Threw;
+        }
       return ESR_Failed;
+    }
     return Scope.destroy() ? ESR_Returned : ESR_Failed;
   }
 
@@ -6002,6 +6130,10 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
       if (ESR == ESR_Succeeded)
         Case = nullptr;
       else if (ESR != ESR_CaseNotFound) {
+        if (Info.ThrownException) {
+          Scope.unwindForException();
+          return ESR_Threw;
+        }
         if (ESR != ESR_Failed && !Scope.destroy())
           return ESR_Failed;
         return ESR;
@@ -6020,7 +6152,9 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     if (const Stmt *Init = IS->getInit()) {
       EvalStmtResult ESR = EvaluateStmt(Result, Info, Init);
       if (ESR != ESR_Succeeded) {
-        if (ESR != ESR_Failed && !Scope.destroy())
+        if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
           return ESR_Failed;
         return ESR;
       }
@@ -6039,7 +6173,9 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     if (const Stmt *SubStmt = Cond ? IS->getThen() : IS->getElse()) {
       EvalStmtResult ESR = EvaluateStmt(Result, Info, SubStmt);
       if (ESR != ESR_Succeeded) {
-        if (ESR != ESR_Failed && !Scope.destroy())
+        if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
           return ESR_Failed;
         return ESR;
       }
@@ -6063,7 +6199,9 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
         return ESR;
 
       if (ESR != ESR_Continue) {
-        if (ESR != ESR_Failed && !Scope.destroy())
+        if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
           return ESR_Failed;
         return ESR;
       }
@@ -6103,7 +6241,9 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     if (FS->getInit()) {
       EvalStmtResult ESR = EvaluateStmt(Result, Info, FS->getInit());
       if (ESR != ESR_Succeeded) {
-        if (ESR != ESR_Failed && !ForScope.destroy())
+        if (ESR == ESR_Threw)
+          ForScope.unwindForException();
+        else if (ESR != ESR_Failed && !ForScope.destroy())
           return ESR_Failed;
         return ESR;
       }
@@ -6125,7 +6265,10 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
       if (ShouldPropagateBreakContinue(Info, FS, {&IterScope, &ForScope}, ESR))
         return ESR;
       if (ESR != ESR_Continue) {
-        if (ESR != ESR_Failed && (!IterScope.destroy() || !ForScope.destroy()))
+        if (ESR == ESR_Threw)
+          IterScope.unwindForException();
+        else if (ESR != ESR_Failed &&
+            (!IterScope.destroy() || !ForScope.destroy()))
           return ESR_Failed;
         return ESR;
       }
@@ -6155,7 +6298,9 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     if (FS->getInit()) {
       EvalStmtResult ESR = EvaluateStmt(Result, Info, FS->getInit());
       if (ESR != ESR_Succeeded) {
-        if (ESR != ESR_Failed && !Scope.destroy())
+        if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
           return ESR_Failed;
         return ESR;
       }
@@ -6164,7 +6309,9 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     // Initialize the __range variable.
     EvalStmtResult ESR = EvaluateStmt(Result, Info, FS->getRangeStmt());
     if (ESR != ESR_Succeeded) {
-      if (ESR != ESR_Failed && !Scope.destroy())
+      if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
         return ESR_Failed;
       return ESR;
     }
@@ -6177,13 +6324,17 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
     // Create the __begin and __end iterators.
     ESR = EvaluateStmt(Result, Info, FS->getBeginStmt());
     if (ESR != ESR_Succeeded) {
-      if (ESR != ESR_Failed && !Scope.destroy())
+      if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed &&!Scope.destroy())
         return ESR_Failed;
       return ESR;
     }
     ESR = EvaluateStmt(Result, Info, FS->getEndStmt());
     if (ESR != ESR_Succeeded) {
-      if (ESR != ESR_Failed && !Scope.destroy())
+      if (ESR == ESR_Threw)
+          Scope.unwindForException();
+        else if (ESR != ESR_Failed && !Scope.destroy())
         return ESR_Failed;
       return ESR;
     }
@@ -6208,7 +6359,11 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
       BlockScopeRAII InnerScope(Info);
       ESR = EvaluateStmt(Result, Info, FS->getLoopVarStmt());
       if (ESR != ESR_Succeeded) {
-        if (ESR != ESR_Failed && (!InnerScope.destroy() || !Scope.destroy()))
+        if (ESR == ESR_Threw) {
+          InnerScope.unwindForException();
+          Scope.unwindForException();
+        } else if (ESR != ESR_Failed && 
+            (!InnerScope.destroy() || !Scope.destroy()))
           return ESR_Failed;
         return ESR;
       }
@@ -6218,7 +6373,11 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
       if (ShouldPropagateBreakContinue(Info, FS, {&InnerScope, &Scope}, ESR))
         return ESR;
       if (ESR != ESR_Continue) {
-        if (ESR != ESR_Failed && (!InnerScope.destroy() || !Scope.destroy()))
+        if (ESR == ESR_Threw) {
+          InnerScope.unwindForException();
+          Scope.unwindForException();
+        } else if (ESR != ESR_Failed &&
+            (!InnerScope.destroy() || !Scope.destroy()))
           return ESR_Failed;
         return ESR;
       }
@@ -6290,8 +6449,51 @@ static EvalStmtResult EvaluateStmt(StmtResult &Result, EvalInfo &Info,
   case Stmt::DefaultStmtClass:
     return EvaluateStmt(Result, Info, cast<SwitchCase>(S)->getSubStmt(), Case);
   case Stmt::CXXTryStmtClass:
-    // Evaluate try blocks by evaluating all sub statements.
-    return EvaluateStmt(Result, Info, cast<CXXTryStmt>(S)->getTryBlock(), Case);
+    return EvaluateTryStmt(Result, Info, cast<CXXTryStmt>(S));
+  case Stmt::CXXThrowExprClass: {
+    if (!Info.getLangOpts().CPlusPlus26) {
+      if (const Expr *E = dyn_cast<Expr>(S)) {
+        if (E->isValueDependent()) {
+          if (!EvaluateDependentExpr(E, Info))
+            return ESR_Failed;
+        } else {
+          // Don't bother evaluating beyond an expression-statement which
+          // couldn't be evaluated.
+          // FIXME: Do we need the FullExpressionRAII object here?
+          // VisitExprWithCleanups should create one when necessary.
+          FullExpressionRAII Scope(Info);
+          if (!EvaluateIgnoredValue(Info, E) || !Scope.destroy()) {
+            if (Info.ThrownException)
+              return ESR_Threw;
+            return ESR_Failed;
+          }
+        }
+        return ESR_Succeeded;
+      }
+    }
+    const CXXThrowExpr *TE = cast<CXXThrowExpr>(S);
+    if (!Info.Ctx.getLangOpts().CPlusPlus26) {
+      // Info.CCEDiag(TE, diag::note_constexpr_throw);
+      return ESR_Failed;
+    }
+    if (!TE->getSubExpr()) {
+      if (!Info.ThrownException) {
+        Info.FFDiag(TE->getThrowLoc(), diag::note_constexpr_rethrow_no_exception);
+        return ESR_Failed;
+      }
+      return ESR_Threw;
+    }
+
+    QualType ExceptionType = TE->getSubExpr()->getType();
+    APValue ExceptionVal;
+
+    if (!Evaluate(ExceptionVal, Info, TE->getSubExpr()))
+      return ESR_Failed;
+
+    Info.ThrownException = EvalInfo::ThrownExceptionInfo{
+        std::move(ExceptionVal), ExceptionType, TE->getThrowLoc()};
+    return ESR_Threw;
+  }
   }
 }
 
@@ -7049,6 +7251,9 @@ static bool HandleFunctionCall(SourceLocation CallLoc,
       return true;
     Info.FFDiag(Callee->getEndLoc(), diag::note_constexpr_no_return);
   }
+
+  if (ESR == ESR_Threw)
+    return false;
   return ESR == ESR_Returned;
 }
 
@@ -7090,7 +7295,8 @@ static bool HandleConstructorCall(const Expr *E, const LValue &This,
           !InitScope.destroy())
         return false;
     }
-    return EvaluateStmt(Ret, Info, Definition->getBody()) != ESR_Failed;
+    EvalStmtResult ESR = EvaluateStmt(Ret, Info, Definition->getBody());
+    return ESR != ESR_Failed && ESR != ESR_Threw;
   }
 
   // For a trivial copy or move constructor, perform an APValue copy. This is
@@ -7272,9 +7478,13 @@ static bool HandleConstructorCall(const Expr *E, const LValue &This,
 
   EvalObj.finishedConstructingFields();
 
-  return Success &&
-         EvaluateStmt(Ret, Info, Definition->getBody()) != ESR_Failed &&
-         LifetimeExtendedScope.destroy();
+  if (!Success)
+    return false;
+
+  EvalStmtResult ESR = EvaluateStmt(Ret, Info, Definition->getBody());
+  if (ESR == ESR_Threw || ESR == ESR_Failed)
+    return false;
+  return LifetimeExtendedScope.destroy();
 }
 
 static bool HandleConstructorCall(const Expr *E, const LValue &This,
@@ -20997,8 +21207,15 @@ bool Expr::EvaluateAsConstantExpr(EvalResult &Result, const ASTContext &Ctx,
   // evaluating the expression (per C++23 [class.temporary]/p4).
   FullExpressionRAII Scope(Info);
   if (!::EvaluateInPlace(Result.Val, Info, LVal, this) ||
-      Result.HasSideEffects || !Scope.destroy())
+      Result.HasSideEffects || !Scope.destroy()) {
+    if (Info.ThrownException) {
+      Result.HasThrownException = true;
+      Info.FFDiag(Info.ThrownException->ThrowLoc,
+                  diag::note_constexpr_uncaught_exception)
+          << Info.ThrownException->Type;
+    }
     return false;
+  }
 
   if (!Info.discardCleanups())
     llvm_unreachable("Unhandled cleanup; missing full expression marker?");
@@ -21076,8 +21293,13 @@ bool Expr::EvaluateAsInitializer(APValue &Value, const ASTContext &Ctx,
       FullExpressionRAII Scope(Info);
       if (!EvaluateInPlace(Value, Info, LVal, this,
                            /*AllowNonLiteralTypes=*/true) ||
-          EStatus.HasSideEffects)
+          EStatus.HasSideEffects) {
+        if (Info.ThrownException)
+          Info.FFDiag(Info.ThrownException->ThrowLoc,
+                      diag::note_constexpr_uncaught_exception)
+              << Info.ThrownException->Type;
         return false;
+      }
     }
 
     // At this point, any lifetime-extended temporaries are completely
@@ -21286,7 +21508,6 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
   case Expr::CXXNullPtrLiteralExprClass:
   case Expr::UserDefinedLiteralClass:
   case Expr::CXXThisExprClass:
-  case Expr::CXXThrowExprClass:
   case Expr::CXXNewExprClass:
   case Expr::CXXDeleteExprClass:
   case Expr::CXXPseudoDestructorExprClass:
@@ -21366,7 +21587,13 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
         return CheckICE(cast<InitListExpr>(E)->getInit(0), Ctx);
     return ICEDiag(IK_NotICE, E->getBeginLoc());
   }
-
+  
+  case Expr::CXXThrowExprClass: {
+    const auto *TE = cast<CXXThrowExpr>(E);
+    if (TE->getSubExpr())
+      return CheckICE(TE->getSubExpr(), Ctx);
+    return ICEDiag(IK_NotICE, E->getBeginLoc());
+  }
   case Expr::SizeOfPackExprClass:
   case Expr::GNUNullExprClass:
   case Expr::SourceLocExprClass:

@@ -18300,6 +18300,12 @@ static void EvaluateAndDiagnoseImmediateInvocation(
   bool Result = CE->EvaluateAsConstantExpr(
       Eval, SemaRef.getASTContext(), ConstantExprKind::ImmediateInvocation);
   if (!Result || !Notes.empty()) {
+
+    // If the consteval call failed because it threw an exception,
+    // defer the error. The exception may be caught by a surrounding try/catch
+    // when the full constant expression is evaluated later.
+    if (Eval.HasThrownException)
+      return;
     SemaRef.FailedImmediateInvocations.insert(CE);
     Expr *InnerExpr = CE->getSubExpr()->IgnoreImplicit();
     if (auto *FunctionalCast = dyn_cast<CXXFunctionalCastExpr>(InnerExpr))
