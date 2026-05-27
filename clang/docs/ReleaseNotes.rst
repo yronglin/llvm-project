@@ -197,6 +197,7 @@ C++2c Feature Support
 ^^^^^^^^^^^^^^^^^^^^^
 
 - Clang now propagates ``constinit`` and ``constexpr`` in structured bindings with tuple-like initializers.
+- Clang now supports `P2752R3 <https://wg21.link/p2752r3>`_ 'Static storage for braced initializers'. (#GH104487)
 
 C++23 Feature Support
 ^^^^^^^^^^^^^^^^^^^^^
