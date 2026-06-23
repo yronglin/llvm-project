@@ -238,6 +238,10 @@ public:
   uint32_t andFeatures = 0;
   bool hasCommonSyms = false;
   std::optional<AArch64PauthAbiCoreInfo> aarch64PauthAbiCoreInfo;
+
+  // Symbol table indices listed by .pnu_symtab. If present, lld uses these
+  // symbols as .rodata.pnu piece boundaries instead of scanning every symbol.
+  SmallVector<uint32_t, 0> pnuSymtab;
 };
 
 // .o file.

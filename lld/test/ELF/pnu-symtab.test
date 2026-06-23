@@ -1,0 +1,107 @@
+# REQUIRES: x86
+
+# RUN: rm -rf %t && split-file %s %t
+
+# RUN: yaml2obj %t/metadata.yaml -o %t/metadata.o
+# RUN: ld.lld %t/metadata.o -o %t/metadata
+# RUN: llvm-readelf -x .rodata %t/metadata | FileCheck %s --check-prefix=HEX
+# RUN: llvm-readelf -S %t/metadata | FileCheck %s --check-prefix=SECTIONS --implicit-check-not=.pnu_symtab
+
+# RUN: yaml2obj %t/bad-size.yaml -o %t/bad-size.o
+# RUN: not ld.lld %t/bad-size.o -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD-SIZE --implicit-check-not=error:
+
+# RUN: yaml2obj %t/bad-index.yaml -o %t/bad-index.o
+# RUN: not ld.lld %t/bad-index.o -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD-INDEX --implicit-check-not=error:
+
+# HEX:      Hex dump of section '.rodata':
+# HEX-NEXT: 0x{{[0-9a-f]+}} 01000000 02000000 03000000
+
+# SECTIONS: .rodata
+
+# BAD-SIZE: error: {{.*}}bad-size.o:(.pnu_symtab): section size is not a multiple of 4
+# BAD-INDEX: error: {{.*}}bad-index.o:(.pnu_symtab+0x0): invalid symbol index: 255
+
+#--- metadata.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_REL
+  Machine: EM_X86_64
+Sections:
+  - Name:         .text
+    Type:         SHT_PROGBITS
+    Flags:        [ SHF_ALLOC, SHF_EXECINSTR ]
+    Content:      C3
+  - Name:         .rodata.pnu
+    Type:         SHT_PROGBITS
+    Flags:        [ SHF_ALLOC ]
+    AddressAlign: 4
+    ## pnu_123, a decoy object not listed in .pnu_symtab, then pnu_23.
+    Content:      010000000200000003000000630000000200000003000000
+  - Name:         .pnu_symtab
+    Type:         SHT_PROGBITS
+    ## Symbol indices 2 and 4: pnu_123 and pnu_23. If lld ignored this
+    ## metadata and scanned every object symbol, the 0x63 decoy would appear
+    ## in the output .rodata.
+    Content:      0200000004000000
+Symbols:
+  - Name:    _start
+    Section: .text
+    Binding: STB_GLOBAL
+  - Name:    pnu_123
+    Type:    STT_OBJECT
+    Section: .rodata.pnu
+    Value:   0
+    Size:    12
+  - Name:    pnu_decoy
+    Type:    STT_OBJECT
+    Section: .rodata.pnu
+    Value:   12
+    Size:    4
+  - Name:    pnu_23
+    Type:    STT_OBJECT
+    Section: .rodata.pnu
+    Value:   16
+    Size:    8
+
+#--- bad-size.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_REL
+  Machine: EM_X86_64
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Content: C3
+  - Name:    .pnu_symtab
+    Type:    SHT_PROGBITS
+    Content: 02
+Symbols:
+  - Name:    _start
+    Section: .text
+    Binding: STB_GLOBAL
+
+#--- bad-index.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS64
+  Data:    ELFDATA2LSB
+  Type:    ET_REL
+  Machine: EM_X86_64
+Sections:
+  - Name:    .text
+    Type:    SHT_PROGBITS
+    Flags:   [ SHF_ALLOC, SHF_EXECINSTR ]
+    Content: C3
+  - Name:    .pnu_symtab
+    Type:    SHT_PROGBITS
+    Content: FF000000
+Symbols:
+  - Name:    _start
+    Section: .text
+    Binding: STB_GLOBAL
+

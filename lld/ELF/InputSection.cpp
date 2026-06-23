@@ -1513,24 +1513,50 @@ void MergeInputSection::splitPnuPieces() {
   const bool live = !(flags & SHF_ALLOC) || !getCtx().arg.gcSections;
   SmallVector<std::pair<uint64_t, uint64_t>, 0> ranges;
 
-  for (Symbol *sym : file->getSymbols()) {
-    auto *d = dyn_cast<Defined>(sym);
-    if (!d || d->section != this || d->isSection() || d->size == 0)
-      continue;
+  auto addRange = [&](Defined &d) {
     uint64_t begin = d->value;
     uint64_t end = begin + d->size;
     if (begin > data.size() || end < begin || end > data.size()) {
-      Err(getCtx()) << this << ": symbol '" << d->getName()
+      Err(getCtx()) << this << ": symbol '" << d.getName()
                     << "' range is outside .rodata.pnu";
-      continue;
+      return;
     }
     ranges.emplace_back(begin, end);
+  };
+
+  auto *elfFile = dyn_cast<ELFFileBase>(file);
+  bool usePnuSymtab = elfFile && !elfFile->pnuSymtab.empty();
+  if (usePnuSymtab) {
+    ArrayRef<Symbol *> syms = file->getSymbols();
+    for (uint32_t symIdx : elfFile->pnuSymtab) {
+      Symbol *sym = syms[symIdx];
+      auto *d = dyn_cast<Defined>(sym);
+      if (!d || !d->isObject() || d->size == 0) {
+        Err(getCtx()) << this << ": .pnu_symtab symbol '" << sym->getName()
+                      << "' is not a non-empty object";
+        continue;
+      }
+      if (d->section == this)
+        addRange(*d);
+    }
+  } else {
+    for (Symbol *sym : file->getSymbols()) {
+      auto *d = dyn_cast<Defined>(sym);
+      if (!d || d->section != this || d->isSection() || d->size == 0)
+        continue;
+      addRange(*d);
+    }
   }
 
   llvm::sort(ranges);
   ranges.erase(std::unique(ranges.begin(), ranges.end()), ranges.end());
-  if (ranges.empty() && !data.empty())
+  if (ranges.empty() && !data.empty()) {
+    if (usePnuSymtab)
+      Err(getCtx()) << this
+                    << ": .pnu_symtab does not reference any symbols in "
+                       ".rodata.pnu";
     ranges.emplace_back(0, data.size());
+  }
 
   uint64_t prevEnd = 0;
   for (auto [begin, end] : ranges) {

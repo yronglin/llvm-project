@@ -1105,6 +1105,32 @@ template <class ELFT>
 InputSectionBase *ObjFile<ELFT>::createInputSection(uint32_t idx,
                                                     const Elf_Shdr &sec,
                                                     StringRef name) {
+  if (name == ".pnu_symtab") {
+    if (sec.sh_type != SHT_PROGBITS)
+      Err(ctx) << this << ":(" << name
+               << "): .pnu_symtab must have type SHT_PROGBITS";
+    if (sec.sh_flags & SHF_ALLOC)
+      Err(ctx) << this << ":(" << name
+               << "): allocatable .pnu_symtab section is not supported";
+
+    ArrayRef<uint8_t> data = check(this->getObj().getSectionContents(sec));
+    if (data.size() % 4 != 0)
+      Err(ctx) << this << ":(" << name
+               << "): section size is not a multiple of 4";
+
+    for (size_t off = 0, end = data.size() & ~(size_t)3; off != end;
+         off += 4) {
+      uint32_t symIdx = read32<ELFT::Endianness>(data.data() + off);
+      if (symIdx == 0 || symIdx >= numSymbols) {
+        Err(ctx) << this << ":(" << name << "+0x" << Twine::utohexstr(off)
+                 << "): invalid symbol index: " << symIdx;
+        continue;
+      }
+      pnuSymtab.push_back(symIdx);
+    }
+    return &InputSection::discarded;
+  }
+
   if (name.starts_with(".n")) {
     // The GNU linker uses .note.GNU-stack section as a marker indicating
     // that the code in the object file does not expect that the stack is
