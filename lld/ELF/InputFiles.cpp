@@ -905,6 +905,9 @@ void ObjFile<ELFT>::initializeSections(bool ignoreComdats,
       // simply handle such sections as non-mergeable ones. Degrading like this
       // is acceptable because section merging is optional.
       if (auto *ms = dyn_cast<MergeInputSection>(s)) {
+        if (ms->name == ".rodata.pnu")
+          Err(ctx) << ms << ": relocations in .rodata.pnu sections are not "
+                   << "supported";
         s = makeThreadLocal<InputSection>(ms->file, ms->name, ms->type,
                                           ms->flags, ms->addralign, ms->entsize,
                                           ms->contentMaybeDecompress());

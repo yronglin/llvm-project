@@ -5,22 +5,27 @@
 # RUN: llvm-mc -filetype=obj -triple=x86_64 %t/b.s -o %t/b.o
 # RUN: ld.lld %t/a.o %t/b.o -o %t/out
 # RUN: llvm-readelf -x .rodata %t/out | FileCheck %s --check-prefix=HEX
-# RUN: llvm-nm -n %t/out | FileCheck %s --check-prefix=NM
+# RUN: llvm-nm -a -n %t/out | FileCheck %s --check-prefix=NM
 
 # HEX:      Hex dump of section '.rodata':
 # HEX-NEXT: 0x{{[0-9a-f]+}} 01000000 02000000 03000000
 
 # NM-DAG: [[#%x,BASE:]] R pnu_123
+# NM-DAG: {{0*}}[[#BASE]] r pnu_local_123
 # NM-DAG: {{0*}}[[#BASE]] R pnu_123_b
 # NM-DAG: {{0*}}[[#BASE+4]] R pnu_23
+# NM-DAG: {{0*}}[[#BASE+4]] r pnu_local_23
 
 #--- a.s
 .text
 .globl _start
 _start:
+  leaq pnu_local_123(%rip), %rax
   .quad pnu_123
   .quad pnu_23
   .quad pnu_123_b
+  .quad pnu_local_123
+  .quad pnu_local_23
 
 .section .rodata.pnu,"a",@progbits
 .p2align 2
@@ -37,6 +42,21 @@ pnu_123:
 .type pnu_23,@object
 .size pnu_23,8
 pnu_23:
+  .long 2
+  .long 3
+
+.p2align 2
+.type pnu_local_123,@object
+.size pnu_local_123,12
+pnu_local_123:
+  .long 1
+  .long 2
+  .long 3
+
+.p2align 2
+.type pnu_local_23,@object
+.size pnu_local_23,8
+pnu_local_23:
   .long 2
   .long 3
 
