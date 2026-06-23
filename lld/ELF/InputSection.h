@@ -346,8 +346,10 @@ public:
   LLVM_ATTRIBUTE_ALWAYS_INLINE
   llvm::CachedHashStringRef getData(size_t i) const {
     size_t begin = pieces[i].inputOff;
-    size_t end =
-        (pieces.size() - 1 == i) ? content().size() : pieces[i + 1].inputOff;
+    size_t end = pnuPieceEndOffs.empty()
+                     ? ((pieces.size() - 1 == i) ? content().size()
+                                                  : pieces[i + 1].inputOff)
+                     : pnuPieceEndOffs[i];
     return {toStringRef(content().slice(begin, end - begin)), pieces[i].hash};
   }
 
@@ -362,8 +364,11 @@ public:
   }
 
 private:
+  bool isPnuSection() const { return name == ".rodata.pnu"; }
+  void splitPnuPieces();
   void splitStrings(StringRef s, size_t size);
   void splitNonStrings(ArrayRef<uint8_t> a, size_t size);
+  SmallVector<uint32_t, 0> pnuPieceEndOffs;
 };
 
 struct EhSectionPiece {

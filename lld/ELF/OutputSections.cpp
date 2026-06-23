@@ -190,7 +190,7 @@ static MergeSyntheticSection *createMergeSynthetic(Ctx &ctx, StringRef name,
                                                    uint32_t type,
                                                    uint64_t flags,
                                                    uint32_t addralign) {
-  if ((flags & SHF_STRINGS) && ctx.arg.optimize >= 2)
+  if (name == ".rodata.pnu" || ((flags & SHF_STRINGS) && ctx.arg.optimize >= 2))
     return make<MergeTailSection>(ctx, name, type, flags, addralign);
   return make<MergeNoTailSection>(ctx, name, type, flags, addralign);
 }
@@ -233,8 +233,10 @@ void OutputSection::finalizeInputSections() {
         // section.
         //
         // SHF_STRINGS section with different alignments should not be merged.
+        bool isPnu = ms->name == ".rodata.pnu";
         return sec->flags == ms->flags && sec->entsize == ms->entsize &&
-               (sec->addralign == ms->addralign || !(sec->flags & SHF_STRINGS));
+               (sec->addralign == ms->addralign ||
+                (!isPnu && !(sec->flags & SHF_STRINGS)));
       });
       if (i == mergeSections.end()) {
         MergeSyntheticSection *syn = createMergeSynthetic(

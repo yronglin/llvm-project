@@ -1178,6 +1178,14 @@ InputSectionBase *ObjFile<ELFT>::createInputSection(uint32_t idx,
   if (name == ".eh_frame" && !ctx.arg.relocatable)
     return makeThreadLocal<EhInputSection>(*this, sec, name);
 
+  if (name == ".rodata.pnu" && !ctx.arg.relocatable) {
+    if (sec.sh_flags & SHF_WRITE)
+      Err(ctx) << this << ":(" << name
+               << "): writable .rodata.pnu section is not supported";
+    if (sec.sh_size != 0)
+      return makeThreadLocal<MergeInputSection>(*this, sec, name);
+  }
+
   if ((sec.sh_flags & SHF_MERGE) && shouldMerge(sec, name))
     return makeThreadLocal<MergeInputSection>(*this, sec, name);
   return makeThreadLocal<InputSection>(*this, sec, name);

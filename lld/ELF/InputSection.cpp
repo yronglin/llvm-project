@@ -1508,6 +1508,50 @@ void MergeInputSection::splitNonStrings(ArrayRef<uint8_t> data,
     pieces[j] = {i, (uint32_t)xxh3_64bits(data.slice(i, entSize)), live};
 }
 
+void MergeInputSection::splitPnuPieces() {
+  ArrayRef<uint8_t> data = contentMaybeDecompress();
+  const bool live = !(flags & SHF_ALLOC) || !getCtx().arg.gcSections;
+  SmallVector<std::pair<uint64_t, uint64_t>, 0> ranges;
+
+  for (Symbol *sym : file->getSymbols()) {
+    auto *d = dyn_cast<Defined>(sym);
+    if (!d || d->section != this || d->isSection() || d->size == 0)
+      continue;
+    uint64_t begin = d->value;
+    uint64_t end = begin + d->size;
+    if (begin > data.size() || end < begin || end > data.size()) {
+      Err(getCtx()) << this << ": symbol '" << d->getName()
+                    << "' range is outside .rodata.pnu";
+      continue;
+    }
+    ranges.emplace_back(begin, end);
+  }
+
+  llvm::sort(ranges);
+  ranges.erase(std::unique(ranges.begin(), ranges.end()), ranges.end());
+  if (ranges.empty() && !data.empty())
+    ranges.emplace_back(0, data.size());
+
+  uint64_t prevEnd = 0;
+  for (auto [begin, end] : ranges) {
+    if (begin < prevEnd) {
+      Err(getCtx()) << this << ": overlapping .rodata.pnu symbol ranges are "
+                    << "not supported";
+      pieces.clear();
+      pnuPieceEndOffs.clear();
+      return;
+    }
+    if (begin > UINT32_MAX || end > UINT32_MAX) {
+      Err(getCtx()) << this << ": .rodata.pnu piece offset exceeds 32 bits";
+      continue;
+    }
+    ArrayRef<uint8_t> piece = data.slice(begin, end - begin);
+    pieces.emplace_back(begin, (uint32_t)xxh3_64bits(piece), live);
+    pnuPieceEndOffs.push_back(end);
+    prevEnd = end;
+  }
+}
+
 template <class ELFT>
 MergeInputSection::MergeInputSection(ObjFile<ELFT> &f,
                                      const typename ELFT::Shdr &header,
@@ -1531,7 +1575,9 @@ MergeInputSection::MergeInputSection(Ctx &ctx, StringRef name, uint32_t type,
 void MergeInputSection::splitIntoPieces() {
   assert(pieces.empty());
 
-  if (flags & SHF_STRINGS)
+  if (isPnuSection())
+    splitPnuPieces();
+  else if (flags & SHF_STRINGS)
     splitStrings(toStringRef(contentMaybeDecompress()), entsize);
   else
     splitNonStrings(contentMaybeDecompress(), entsize);
@@ -1544,7 +1590,7 @@ SectionPiece &MergeInputSection::getSectionPiece(uint64_t offset) {
     return pieces[idx - 1];
   assert(offset < content().size());
   // For non-string fixed-size records, piece index = offset / entsize.
-  if (!(flags & SHF_STRINGS))
+  if (!(flags & SHF_STRINGS) && !isPnuSection())
     return pieces[offset / entsize];
   return partition_point(
       pieces,
