@@ -7766,29 +7766,40 @@ CodeGenModule::EmitStaticInitListBackingArray(llvm::Constant *Init,
                                               CharUnits Align) {
   LangAS AddrSpace = GetGlobalConstantAddressSpace();
   auto TargetAS = getContext().getTargetAddressSpace(AddrSpace);
+  bool UsePnuSection = AddrSpace == LangAS::Default &&
+                       getTarget().getTriple().isOSBinFormatELF() &&
+                       !Init->needsRelocation();
   llvm::Constant *StoredInit = Init;
-  const llvm::DataLayout &DL = getModule().getDataLayout();
-  uint64_t Size = DL.getTypeAllocSize(Init->getType());
-  uint64_t MergeableSize = llvm::PowerOf2Ceil(std::max<uint64_t>(Size, 4));
-  if (!Init->needsRelocation() && Size > 0 && Size <= 32 &&
-      MergeableSize >= 4 && MergeableSize != Size) {
-    uint64_t PaddingSize = MergeableSize - Size;
-    auto *PaddingTy =
-        llvm::ArrayType::get(llvm::Type::getInt8Ty(getLLVMContext()),
-                             PaddingSize);
-    auto *PaddedTy = llvm::StructType::get(
-        getLLVMContext(), {Init->getType(), PaddingTy}, /*isPacked=*/true);
-    StoredInit = llvm::ConstantStruct::get(
-        PaddedTy, {Init, llvm::ConstantAggregateZero::get(PaddingTy)});
+  if (!UsePnuSection) {
+    const llvm::DataLayout &DL = getModule().getDataLayout();
+    uint64_t Size = DL.getTypeAllocSize(Init->getType());
+    uint64_t MergeableSize = llvm::PowerOf2Ceil(std::max<uint64_t>(Size, 4));
+    if (!Init->needsRelocation() && Size > 0 && Size <= 32 &&
+        MergeableSize >= 4 && MergeableSize != Size) {
+      uint64_t PaddingSize = MergeableSize - Size;
+      auto *PaddingTy =
+          llvm::ArrayType::get(llvm::Type::getInt8Ty(getLLVMContext()),
+                               PaddingSize);
+      auto *PaddedTy = llvm::StructType::get(
+          getLLVMContext(), {Init->getType(), PaddingTy}, /*isPacked=*/true);
+      StoredInit = llvm::ConstantStruct::get(
+          PaddedTy, {Init, llvm::ConstantAggregateZero::get(PaddingTy)});
+    }
   }
 
   llvm::GlobalVariable *&Entry = StaticInitListBackingArrayMap[Init];
   if (!Entry) {
+    llvm::GlobalValue::LinkageTypes Linkage =
+        UsePnuSection ? llvm::GlobalValue::InternalLinkage
+                      : llvm::GlobalValue::PrivateLinkage;
     Entry = new llvm::GlobalVariable(
         getModule(), StoredInit->getType(), /*isConstant=*/true,
-        llvm::GlobalValue::PrivateLinkage, StoredInit, ".init.list",
+        Linkage, StoredInit, ".init.list",
         /*InsertBefore=*/nullptr, llvm::GlobalValue::NotThreadLocal, TargetAS);
-    Entry->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    if (UsePnuSection)
+      Entry->setSection(".rodata.pnu");
+    else
+      Entry->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   }
   Entry->setAlignment(
       std::max(Entry->getAlign().valueOrOne(), Align.getAsAlign()));
