@@ -1262,6 +1262,12 @@ bool ELFObjectWriter::useSectionSymbol(const MCValue &Val,
   if (Sym->isInSection()) {
     auto &Sec = static_cast<const MCSectionELF &>(Sym->getSection());
     unsigned Flags = Sec.getFlags();
+    // .rodata.pnu piece boundaries are defined by local STT_OBJECT symbols.
+    // Keep relocations against the object symbol so linkers do not need to
+    // infer a piece offset from relocation addends such as x86 PC-relative -4.
+    if (Sec.getName() == ".rodata.pnu")
+      return false;
+
     if (Flags & ELF::SHF_MERGE) {
       if (C != 0)
         return false;
