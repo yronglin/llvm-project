@@ -1190,12 +1190,16 @@ protected:
     /// The default capture kind, which is a value of type
     /// LambdaCaptureDefault.
     LLVM_PREFERRED_TYPE(LambdaCaptureDefault)
-    unsigned CaptureDefault : 2;
+    unsigned CaptureDefault : 3;
 
     /// Whether this lambda had an explicit parameter list vs. an
     /// implicit (and empty) parameter list.
     LLVM_PREFERRED_TYPE(bool)
     unsigned ExplicitParams : 1;
+
+    /// Whether this lambda had an explicit const lambda-specifier.
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned ExplicitConst : 1;
 
     /// Whether this lambda had the result type explicitly specified.
     LLVM_PREFERRED_TYPE(bool)

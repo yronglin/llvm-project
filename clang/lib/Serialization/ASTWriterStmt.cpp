@@ -1874,6 +1874,7 @@ void ASTStmtWriter::VisitLambdaExpr(LambdaExpr *E) {
   Record.push_back(E->LambdaExprBits.CaptureDefault); // FIXME: stable encoding
   Record.AddSourceLocation(E->CaptureDefaultLoc);
   Record.push_back(E->LambdaExprBits.ExplicitParams);
+  Record.push_back(E->LambdaExprBits.ExplicitConst);
   Record.push_back(E->LambdaExprBits.ExplicitResultType);
   Record.AddSourceLocation(E->ClosingBrace);
 

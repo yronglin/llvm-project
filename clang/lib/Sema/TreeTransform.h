@@ -16078,7 +16078,8 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
       QualType NewInitCaptureType =
           getSema().buildLambdaInitCaptureInitialization(
               C->getLocation(), C->getCaptureKind() == LCK_ByRef,
-              EllipsisLoc, NumExpansions, OldVD->getIdentifier(),
+              C->getCaptureQualifier(), EllipsisLoc, NumExpansions,
+              OldVD->getIdentifier(),
               cast<VarDecl>(C->getCapturedVar())->getInitStyle() !=
                   VarDecl::CInit,
               NewExprInit);
@@ -16174,6 +16175,7 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
   getSema().buildLambdaScope(LSI, NewCallOperator, E->getIntroducerRange(),
                              E->getCaptureDefault(), E->getCaptureDefaultLoc(),
                              E->hasExplicitParameters(), E->isMutable());
+  LSI->ExplicitConst = E->hasExplicitConstSpecifier();
 
   // Introduce the context of the call operator.
   Sema::ContextRAII SavedContext(getSema(), NewCallOperator,
@@ -16235,7 +16237,9 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
           break;
         }
         NewVDs.push_back(NewVD);
-        getSema().addInitCapture(LSI, NewVD, C->getCaptureKind() == LCK_ByRef);
+        getSema().addInitCapture(LSI, NewVD, C->getCaptureKind() == LCK_ByRef,
+                                 C->getCaptureQualifier(),
+                                 C->getCaptureQualifierLoc());
         // Cases we want to tackle:
         //   ([C(Pack)] {}, ...)
         // But rule out cases e.g.
@@ -16288,7 +16292,9 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
           }
 
           // Capture the transformed variable.
-          getSema().tryCaptureVariable(CapturedVar, C->getLocation(), Kind);
+          getSema().tryCaptureVariable(
+              CapturedVar, C->getLocation(), Kind, SourceLocation(),
+              C->getCaptureQualifier(), C->getCaptureQualifierLoc());
         }
 
         // FIXME: Retain a pack expansion if RetainExpansion is true.
@@ -16314,7 +16320,8 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
 
     // Capture the transformed variable.
     getSema().tryCaptureVariable(CapturedVar, C->getLocation(), Kind,
-                                 EllipsisLoc);
+                                 EllipsisLoc, C->getCaptureQualifier(),
+                                 C->getCaptureQualifierLoc());
   }
   getSema().finishLambdaExplicitCaptures(LSI);
 

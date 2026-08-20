@@ -22,8 +22,39 @@ namespace clang {
 enum LambdaCaptureDefault {
   LCD_None,
   LCD_ByCopy,
-  LCD_ByRef
+  LCD_ByRef,
+  LCD_ByConstCopy,
+  LCD_ByMutableCopy,
+  LCD_ByConstRef
 };
+
+/// An explicit or default qualifier applied to a lambda capture.
+enum LambdaCaptureQualifier { LCQ_None, LCQ_Const, LCQ_Mutable };
+
+inline bool isLambdaCaptureDefaultByCopy(LambdaCaptureDefault Default) {
+  return Default == LCD_ByCopy || Default == LCD_ByConstCopy ||
+         Default == LCD_ByMutableCopy;
+}
+
+inline bool isLambdaCaptureDefaultByRef(LambdaCaptureDefault Default) {
+  return Default == LCD_ByRef || Default == LCD_ByConstRef;
+}
+
+inline LambdaCaptureQualifier
+getLambdaCaptureDefaultQualifier(LambdaCaptureDefault Default) {
+  switch (Default) {
+  case LCD_None:
+  case LCD_ByCopy:
+  case LCD_ByRef:
+    return LCQ_None;
+  case LCD_ByConstCopy:
+  case LCD_ByConstRef:
+    return LCQ_Const;
+  case LCD_ByMutableCopy:
+    return LCQ_Mutable;
+  }
+  return LCQ_None;
+}
 
 /// The different capture forms in a lambda introducer
 ///

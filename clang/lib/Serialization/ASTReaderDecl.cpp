@@ -2038,7 +2038,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
     BitsUnpacker LambdaBits(Record.readInt());
     Lambda.DependencyKind = LambdaBits.getNextBits(/*Width=*/2);
     Lambda.IsGenericLambda = LambdaBits.getNextBit();
-    Lambda.CaptureDefault = LambdaBits.getNextBits(/*Width=*/2);
+    Lambda.CaptureDefault = LambdaBits.getNextBits(/*Width=*/3);
     Lambda.NumCaptures = LambdaBits.getNextBits(/*Width=*/15);
     Lambda.HasKnownInternalLinkage = LambdaBits.getNextBit();
 
@@ -2061,19 +2061,23 @@ void ASTDeclReader::ReadCXXDefinitionData(
       bool IsImplicit = CaptureBits.getNextBit();
       auto Kind =
           static_cast<LambdaCaptureKind>(CaptureBits.getNextBits(/*Width=*/3));
+      auto Qualifier = static_cast<LambdaCaptureQualifier>(
+          CaptureBits.getNextBits(/*Width=*/2));
+      SourceLocation QualifierLoc = readSourceLocation();
       switch (Kind) {
       case LCK_StarThis:
       case LCK_This:
       case LCK_VLAType:
-        new (ToCapture)
-            Capture(Loc, IsImplicit, Kind, nullptr, SourceLocation());
+        new (ToCapture) Capture(Loc, IsImplicit, Kind, nullptr,
+                                SourceLocation(), Qualifier, QualifierLoc);
         ToCapture++;
         break;
       case LCK_ByCopy:
       case LCK_ByRef:
         auto *Var = readDeclAs<ValueDecl>();
         SourceLocation EllipsisLoc = readSourceLocation();
-        new (ToCapture) Capture(Loc, IsImplicit, Kind, Var, EllipsisLoc);
+        new (ToCapture) Capture(Loc, IsImplicit, Kind, Var, EllipsisLoc,
+                                Qualifier, QualifierLoc);
         ToCapture++;
         break;
       }
@@ -2162,6 +2166,8 @@ void ASTDeclMerger::MergeDefinitionData(
         LambdaCapture &Cap1 = Lambda1.Captures.front()[I];
         LambdaCapture &Cap2 = Lambda2.Captures.front()[I];
         DetectedOdrViolation |= Cap1.getCaptureKind() != Cap2.getCaptureKind();
+        DetectedOdrViolation |=
+            Cap1.getCaptureQualifier() != Cap2.getCaptureQualifier();
       }
       Lambda1.AddCaptureList(Reader.getContext(), Lambda2.Captures.front());
     }

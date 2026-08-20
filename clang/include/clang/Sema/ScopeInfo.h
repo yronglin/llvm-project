@@ -589,6 +589,8 @@ class Capture {
   /// The location of the ellipsis that expands a parameter pack.
   SourceLocation EllipsisLoc;
 
+  SourceLocation QualifierLoc;
+
   /// The type as it was captured, which is the type of the non-static data
   /// member that would hold the capture.
   QualType CaptureType;
@@ -621,31 +623,36 @@ class Capture {
   LLVM_PREFERRED_TYPE(bool)
   unsigned Invalid : 1;
 
+  LLVM_PREFERRED_TYPE(LambdaCaptureQualifier)
+  unsigned Qualifier : 2;
+
 public:
   Capture(ValueDecl *Var, bool Block, bool ByRef, bool IsNested,
           SourceLocation Loc, SourceLocation EllipsisLoc, QualType CaptureType,
-          bool Invalid)
+          bool Invalid, LambdaCaptureQualifier Qualifier = LCQ_None,
+          SourceLocation QualifierLoc = SourceLocation())
       : CapturedVar(Var), Loc(Loc), EllipsisLoc(EllipsisLoc),
-        CaptureType(CaptureType), Kind(Block   ? Cap_Block
-                                       : ByRef ? Cap_ByRef
-                                               : Cap_ByCopy),
+        QualifierLoc(QualifierLoc), CaptureType(CaptureType),
+        Kind(Block   ? Cap_Block
+             : ByRef ? Cap_ByRef
+                     : Cap_ByCopy),
         Nested(IsNested), CapturesThis(false), ODRUsed(false),
-        NonODRUsed(false), Invalid(Invalid) {}
+        NonODRUsed(false), Invalid(Invalid), Qualifier(Qualifier) {}
 
   enum IsThisCapture { ThisCapture };
   Capture(IsThisCapture, bool IsNested, SourceLocation Loc,
           QualType CaptureType, const bool ByCopy, bool Invalid)
       : Loc(Loc), CaptureType(CaptureType),
         Kind(ByCopy ? Cap_ByCopy : Cap_ByRef), Nested(IsNested),
-        CapturesThis(true), ODRUsed(false), NonODRUsed(false),
-        Invalid(Invalid) {}
+        CapturesThis(true), ODRUsed(false), NonODRUsed(false), Invalid(Invalid),
+        Qualifier(LCQ_None) {}
 
   enum IsVLACapture { VLACapture };
   Capture(IsVLACapture, const VariableArrayType *VLA, bool IsNested,
           SourceLocation Loc, QualType CaptureType)
       : CapturedVLA(VLA), Loc(Loc), CaptureType(CaptureType), Kind(Cap_VLA),
         Nested(IsNested), CapturesThis(false), ODRUsed(false),
-        NonODRUsed(false), Invalid(false) {}
+        NonODRUsed(false), Invalid(false), Qualifier(LCQ_None) {}
 
   bool isThisCapture() const { return CapturesThis; }
   bool isVariableCapture() const {
@@ -660,6 +667,13 @@ public:
   bool isNested() const { return Nested; }
 
   bool isInvalid() const { return Invalid; }
+
+  LambdaCaptureQualifier getCaptureQualifier() const {
+    return static_cast<LambdaCaptureQualifier>(Qualifier);
+  }
+  bool isConstCapture() const { return getCaptureQualifier() == LCQ_Const; }
+  bool isMutableCapture() const { return getCaptureQualifier() == LCQ_Mutable; }
+  SourceLocation getCaptureQualifierLoc() const { return QualifierLoc; }
 
   /// Determine whether this capture is an init-capture.
   bool isInitCapture() const;
@@ -737,9 +751,12 @@ public:
 
   void addCapture(ValueDecl *Var, bool isBlock, bool isByref, bool isNested,
                   SourceLocation Loc, SourceLocation EllipsisLoc,
-                  QualType CaptureType, bool Invalid) {
+                  QualType CaptureType, bool Invalid,
+                  LambdaCaptureQualifier Qualifier = LCQ_None,
+                  SourceLocation QualifierLoc = SourceLocation()) {
     Captures.push_back(Capture(Var, isBlock, isByref, isNested, Loc,
-                               EllipsisLoc, CaptureType, Invalid));
+                               EllipsisLoc, CaptureType, Invalid, Qualifier,
+                               QualifierLoc));
     CaptureMap[Var] = Captures.size();
   }
 
@@ -890,6 +907,10 @@ public:
   /// type, if any.
   SourceLocation CaptureDefaultLoc;
 
+  SourceLocation CaptureDefaultQualifierLoc;
+
+  LambdaCaptureQualifier ImpCaptureQualifier = LCQ_None;
+
   /// The number of captures in the \c Captures list that are
   /// explicit captures.
   unsigned NumExplicitCaptures = 0;
@@ -897,6 +918,9 @@ public:
   /// Whether this is a mutable lambda. Until the mutable keyword is parsed,
   /// we assume the lambda is mutable.
   bool Mutable = true;
+
+  /// Whether the lambda has an explicit const lambda-specifier.
+  bool ExplicitConst = false;
 
   /// Whether the (empty) parameter list is explicit.
   bool ExplicitParams = false;

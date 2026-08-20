@@ -784,8 +784,25 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
   };
 
   // Parse capture-default.
-  if (Tok.is(tok::amp) &&
-      (NextToken().is(tok::comma) || NextToken().is(tok::r_square))) {
+  if (Tok.isOneOf(tok::kw_const, tok::kw_mutable) &&
+      GetLookAheadToken(1).is(tok::equal)) {
+    bool IsConst = Tok.is(tok::kw_const);
+    Intro.DefaultQualifierLoc = ConsumeToken();
+    Diag(Intro.DefaultQualifierLoc, diag::ext_const_mutable_lambda_capture);
+    Intro.Default = IsConst ? LCD_ByConstCopy : LCD_ByMutableCopy;
+    Intro.DefaultLoc = ConsumeToken();
+    First = false;
+    Tentative = nullptr;
+  } else if (Tok.is(tok::kw_const) && GetLookAheadToken(1).is(tok::amp) &&
+             GetLookAheadToken(2).isOneOf(tok::comma, tok::r_square)) {
+    Intro.DefaultQualifierLoc = ConsumeToken();
+    Diag(Intro.DefaultQualifierLoc, diag::ext_const_mutable_lambda_capture);
+    Intro.Default = LCD_ByConstRef;
+    Intro.DefaultLoc = ConsumeToken();
+    First = false;
+    Tentative = nullptr;
+  } else if (Tok.is(tok::amp) &&
+             (NextToken().is(tok::comma) || NextToken().is(tok::r_square))) {
     Intro.Default = LCD_ByRef;
     Intro.DefaultLoc = ConsumeToken();
     First = false;
@@ -841,6 +858,8 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
 
     // Parse capture.
     LambdaCaptureKind Kind = LCK_ByCopy;
+    LambdaCaptureQualifier Qualifier = LCQ_None;
+    SourceLocation QualifierLoc;
     LambdaCaptureInitKind InitKind = LambdaCaptureInitKind::NoInit;
     SourceLocation Loc;
     IdentifierInfo *Id = nullptr;
@@ -848,11 +867,29 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
     ExprResult Init;
     SourceLocation LocStart = Tok.getLocation();
 
+    if (Tok.isOneOf(tok::kw_const, tok::kw_mutable)) {
+      Qualifier = Tok.is(tok::kw_const) ? LCQ_Const : LCQ_Mutable;
+      QualifierLoc = ConsumeToken();
+      NonTentativeAction(
+          [&] { Diag(QualifierLoc, diag::ext_const_mutable_lambda_capture); });
+      if (Tok.isOneOf(tok::kw_const, tok::kw_mutable)) {
+        NonTentativeAction([&] {
+          Diag(Tok.getLocation(), diag::err_lambda_capture_qualifier_repeated);
+        });
+        ConsumeToken();
+      }
+    }
+
     if (Tok.is(tok::star)) {
       Loc = ConsumeToken();
       if (Tok.is(tok::kw_this)) {
         ConsumeToken();
         Kind = LCK_StarThis;
+        if (Qualifier != LCQ_None)
+          NonTentativeAction([&] {
+            Diag(QualifierLoc, diag::err_qualified_this_capture)
+                << 1 << (Qualifier == LCQ_Const ? "const" : "mutable");
+          });
       } else {
         return Result([&] {
           Diag(Tok.getLocation(), diag::err_expected_star_this_capture);
@@ -861,6 +898,11 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
     } else if (Tok.is(tok::kw_this)) {
       Kind = LCK_This;
       Loc = ConsumeToken();
+      if (Qualifier != LCQ_None)
+        NonTentativeAction([&] {
+          Diag(QualifierLoc, diag::err_qualified_this_capture)
+              << 0 << (Qualifier == LCQ_Const ? "const" : "mutable");
+        });
     } else if (Tok.isOneOf(tok::amp, tok::equal) &&
                NextToken().isOneOf(tok::comma, tok::r_square) &&
                Intro.Default == LCD_None) {
@@ -876,6 +918,11 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
 
       if (Tok.is(tok::amp)) {
         Kind = LCK_ByRef;
+        if (Qualifier == LCQ_Mutable)
+          NonTentativeAction(
+              [&] { Diag(QualifierLoc, diag::err_mutable_reference_capture); });
+        if (Qualifier == LCQ_Mutable)
+          Qualifier = LCQ_None;
         ConsumeToken();
 
         if (Tok.is(tok::code_completion)) {
@@ -1065,15 +1112,17 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
         // This performs any lvalue-to-rvalue conversions if necessary, which
         // can affect what gets captured in the containing decl-context.
         InitCaptureType = Actions.actOnLambdaInitCaptureInitialization(
-            Loc, Kind == LCK_ByRef, EllipsisLoc, Id, InitKind, InitExpr);
+            Loc, Kind == LCK_ByRef, Qualifier, EllipsisLoc, Id, InitKind,
+            InitExpr);
         Init = InitExpr;
       });
     }
 
     SourceLocation LocEnd = PrevTokLocation;
 
-    Intro.addCapture(Kind, Loc, Id, EllipsisLoc, InitKind, Init,
-                     InitCaptureType, SourceRange(LocStart, LocEnd));
+    Intro.addCapture(Kind, Qualifier, QualifierLoc, Loc, Id, EllipsisLoc,
+                     InitKind, Init, InitCaptureType,
+                     SourceRange(LocStart, LocEnd));
   }
 
   T.consumeClose();
@@ -1081,16 +1130,15 @@ bool Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
   return false;
 }
 
-static void tryConsumeLambdaSpecifierToken(Parser &P,
-                                           SourceLocation &MutableLoc,
-                                           SourceLocation &StaticLoc,
-                                           SourceLocation &ConstexprLoc,
-                                           SourceLocation &ConstevalLoc,
-                                           SourceLocation &DeclEndLoc) {
+static void tryConsumeLambdaSpecifierToken(
+    Parser &P, SourceLocation &MutableLoc, SourceLocation &StaticLoc,
+    SourceLocation &ConstexprLoc, SourceLocation &ConstevalLoc,
+    SourceLocation &ConstLoc, SourceLocation &DeclEndLoc) {
   assert(MutableLoc.isInvalid());
   assert(StaticLoc.isInvalid());
   assert(ConstexprLoc.isInvalid());
   assert(ConstevalLoc.isInvalid());
+  assert(ConstLoc.isInvalid());
   // Consume constexpr-opt mutable-opt in any sequence, and set the DeclEndLoc
   // to the final of those locations. Emit an error if we have multiple
   // copies of those keywords and recover.
@@ -1120,6 +1168,9 @@ static void tryConsumeLambdaSpecifierToken(Parser &P,
       break;
     case tok::kw_consteval:
       ConsumeLocation(ConstevalLoc, 3);
+      break;
+    case tok::kw_const:
+      ConsumeLocation(ConstLoc, 4);
       break;
     default:
       return;
@@ -1173,10 +1224,19 @@ static void addConstevalToLambdaDeclSpecifier(Parser &P,
   }
 }
 
-static void DiagnoseStaticSpecifierRestrictions(Parser &P,
+static void DiagnoseLambdaSpecifierRestrictions(Parser &P,
                                                 SourceLocation StaticLoc,
                                                 SourceLocation MutableLoc,
+                                                SourceLocation ConstLoc,
                                                 const LambdaIntroducer &Intro) {
+  if (ConstLoc.isValid()) {
+    P.Diag(ConstLoc, diag::ext_const_lambda_specifier);
+    if (MutableLoc.isValid())
+      P.Diag(ConstLoc, diag::err_const_mutable_lambda);
+    if (StaticLoc.isValid())
+      P.Diag(ConstLoc, diag::err_const_static_lambda);
+  }
+
   if (StaticLoc.isInvalid())
     return;
 
@@ -1305,6 +1365,7 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
   bool HasParentheses = false;
   bool HasSpecifiers = false;
   SourceLocation MutableLoc;
+  SourceLocation ConstLoc;
 
   ParseScope Prototype(this, Scope::FunctionPrototypeScope |
                                  Scope::FunctionDeclarationScope |
@@ -1339,11 +1400,11 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
   }
 
   HasSpecifiers =
-      Tok.isOneOf(tok::kw_mutable, tok::arrow, tok::kw___attribute,
-                  tok::kw_constexpr, tok::kw_consteval, tok::kw_static,
-                  tok::kw___private, tok::kw___global, tok::kw___local,
-                  tok::kw___constant, tok::kw___generic, tok::kw_groupshared,
-                  tok::kw_requires, tok::kw_noexcept) ||
+      Tok.isOneOf(tok::kw_mutable, tok::kw_const, tok::arrow,
+                  tok::kw___attribute, tok::kw_constexpr, tok::kw_consteval,
+                  tok::kw_static, tok::kw___private, tok::kw___global,
+                  tok::kw___local, tok::kw___constant, tok::kw___generic,
+                  tok::kw_groupshared, tok::kw_requires, tok::kw_noexcept) ||
       Tok.isRegularKeywordAttribute() ||
       (Tok.is(tok::l_square) && NextToken().is(tok::l_square));
 
@@ -1367,9 +1428,10 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
     SourceLocation StaticLoc;
 
     tryConsumeLambdaSpecifierToken(*this, MutableLoc, StaticLoc, ConstexprLoc,
-                                   ConstevalLoc, DeclEndLoc);
+                                   ConstevalLoc, ConstLoc, DeclEndLoc);
 
-    DiagnoseStaticSpecifierRestrictions(*this, StaticLoc, MutableLoc, Intro);
+    DiagnoseLambdaSpecifierRestrictions(*this, StaticLoc, MutableLoc, ConstLoc,
+                                        Intro);
 
     addStaticToLambdaDeclSpecifier(*this, StaticLoc, DS);
     addConstexprToLambdaDeclSpecifier(*this, ConstexprLoc, DS);
@@ -1379,7 +1441,7 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
   Actions.ActOnLambdaClosureParameters(getCurScope(), ParamInfo);
 
   if (!HasParentheses)
-    Actions.ActOnLambdaClosureQualifiers(Intro, MutableLoc);
+    Actions.ActOnLambdaClosureQualifiers(Intro, MutableLoc, ConstLoc);
 
   if (HasSpecifiers || HasParentheses) {
     // Parse exception-specification[opt].
@@ -1411,7 +1473,7 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
     // We have called ActOnLambdaClosureQualifiers for parentheses-less cases
     // above.
     if (HasParentheses)
-      Actions.ActOnLambdaClosureQualifiers(Intro, MutableLoc);
+      Actions.ActOnLambdaClosureQualifiers(Intro, MutableLoc, ConstLoc);
 
     SourceLocation FunLocalRangeEnd = DeclEndLoc;
 

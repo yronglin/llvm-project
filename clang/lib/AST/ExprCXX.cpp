@@ -1266,8 +1266,11 @@ CXXConstructExpr::CXXConstructExpr(StmtClass SC, EmptyShell Empty,
 
 LambdaCapture::LambdaCapture(SourceLocation Loc, bool Implicit,
                              LambdaCaptureKind Kind, ValueDecl *Var,
-                             SourceLocation EllipsisLoc)
-    : DeclAndBits(Var, 0), Loc(Loc), EllipsisLoc(EllipsisLoc) {
+                             SourceLocation EllipsisLoc,
+                             LambdaCaptureQualifier Qualifier,
+                             SourceLocation QualifierLoc)
+    : DeclAndBits(Var, 0), Loc(Loc), EllipsisLoc(EllipsisLoc),
+      QualifierLoc(QualifierLoc), Qualifier(Qualifier) {
   unsigned Bits = 0;
   if (Implicit)
     Bits |= Capture_Implicit;
@@ -1306,7 +1309,8 @@ LambdaCaptureKind LambdaCapture::getCaptureKind() const {
 LambdaExpr::LambdaExpr(QualType T, SourceRange IntroducerRange,
                        LambdaCaptureDefault CaptureDefault,
                        SourceLocation CaptureDefaultLoc, bool ExplicitParams,
-                       bool ExplicitResultType, ArrayRef<Expr *> CaptureInits,
+                       bool ExplicitConst, bool ExplicitResultType,
+                       ArrayRef<Expr *> CaptureInits,
                        SourceLocation ClosingBrace,
                        bool ContainsUnexpandedParameterPack)
     : Expr(LambdaExprClass, T, VK_PRValue, OK_Ordinary),
@@ -1315,6 +1319,7 @@ LambdaExpr::LambdaExpr(QualType T, SourceRange IntroducerRange,
   LambdaExprBits.NumCaptures = CaptureInits.size();
   LambdaExprBits.CaptureDefault = CaptureDefault;
   LambdaExprBits.ExplicitParams = ExplicitParams;
+  LambdaExprBits.ExplicitConst = ExplicitConst;
   LambdaExprBits.ExplicitResultType = ExplicitResultType;
 
   CXXRecordDecl *Class = getLambdaClass();
@@ -1342,14 +1347,12 @@ LambdaExpr::LambdaExpr(EmptyShell Empty, unsigned NumCaptures)
   getStoredStmts()[NumCaptures] = nullptr; // Not one past the end.
 }
 
-LambdaExpr *LambdaExpr::Create(const ASTContext &Context, CXXRecordDecl *Class,
-                               SourceRange IntroducerRange,
-                               LambdaCaptureDefault CaptureDefault,
-                               SourceLocation CaptureDefaultLoc,
-                               bool ExplicitParams, bool ExplicitResultType,
-                               ArrayRef<Expr *> CaptureInits,
-                               SourceLocation ClosingBrace,
-                               bool ContainsUnexpandedParameterPack) {
+LambdaExpr *LambdaExpr::Create(
+    const ASTContext &Context, CXXRecordDecl *Class,
+    SourceRange IntroducerRange, LambdaCaptureDefault CaptureDefault,
+    SourceLocation CaptureDefaultLoc, bool ExplicitParams, bool ExplicitConst,
+    bool ExplicitResultType, ArrayRef<Expr *> CaptureInits,
+    SourceLocation ClosingBrace, bool ContainsUnexpandedParameterPack) {
   // Determine the type of the expression (i.e., the type of the
   // function object we're creating).
   CanQualType T = Context.getCanonicalTagType(Class);
@@ -1358,8 +1361,8 @@ LambdaExpr *LambdaExpr::Create(const ASTContext &Context, CXXRecordDecl *Class,
   void *Mem = Context.Allocate(Size);
   return new (Mem)
       LambdaExpr(T, IntroducerRange, CaptureDefault, CaptureDefaultLoc,
-                 ExplicitParams, ExplicitResultType, CaptureInits, ClosingBrace,
-                 ContainsUnexpandedParameterPack);
+                 ExplicitParams, ExplicitConst, ExplicitResultType,
+                 CaptureInits, ClosingBrace, ContainsUnexpandedParameterPack);
 }
 
 LambdaExpr *LambdaExpr::CreateDeserialized(const ASTContext &C,

@@ -2434,6 +2434,21 @@ void StmtPrinter::VisitLambdaExpr(LambdaExpr *Node) {
     OS << '&';
     NeedComma = true;
     break;
+
+  case LCD_ByConstCopy:
+    OS << "const =";
+    NeedComma = true;
+    break;
+
+  case LCD_ByMutableCopy:
+    OS << "mutable =";
+    NeedComma = true;
+    break;
+
+  case LCD_ByConstRef:
+    OS << "const&";
+    NeedComma = true;
+    break;
   }
   for (LambdaExpr::capture_iterator C = Node->explicit_capture_begin(),
                                  CEnd = Node->explicit_capture_end();
@@ -2446,6 +2461,11 @@ void StmtPrinter::VisitLambdaExpr(LambdaExpr *Node) {
       OS << ", ";
     NeedComma = true;
 
+    if (C->isConstCapture())
+      OS << "const ";
+    else if (C->isMutableCapture())
+      OS << "mutable ";
+
     switch (C->getCaptureKind()) {
     case LCK_This:
       OS << "this";
@@ -2456,7 +2476,8 @@ void StmtPrinter::VisitLambdaExpr(LambdaExpr *Node) {
       break;
 
     case LCK_ByRef:
-      if (Node->getCaptureDefault() != LCD_ByRef || Node->isInitCapture(C))
+      if (Node->getCaptureDefault() != LCD_ByRef || Node->isInitCapture(C) ||
+          C->getCaptureQualifier() != LCQ_None)
         OS << '&';
       OS << C->getCapturedVar()->getName();
       break;
@@ -2499,9 +2520,9 @@ void StmtPrinter::VisitLambdaExpr(LambdaExpr *Node) {
         /*OmitTemplateKW*/true);
   }
 
+  CXXMethodDecl *Method = Node->getCallOperator();
   if (Node->hasExplicitParameters()) {
     OS << '(';
-    CXXMethodDecl *Method = Node->getCallOperator();
     NeedComma = false;
     for (const auto *P : Method->parameters()) {
       if (NeedComma) {
@@ -2521,10 +2542,14 @@ void StmtPrinter::VisitLambdaExpr(LambdaExpr *Node) {
       OS << "...";
     }
     OS << ')';
+  }
 
-    if (Node->isMutable())
-      OS << " mutable";
+  if (Node->hasExplicitConstSpecifier())
+    OS << " const";
+  if (Node->isMutable())
+    OS << " mutable";
 
+  if (Node->hasExplicitParameters()) {
     auto *Proto = Method->getType()->castAs<FunctionProtoType>();
     Proto->printExceptionSpecification(OS, Policy);
 

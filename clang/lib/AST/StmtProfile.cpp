@@ -2221,8 +2221,10 @@ StmtProfiler::VisitLambdaExpr(const LambdaExpr *S) {
   }
 
   CXXRecordDecl *Lambda = S->getLambdaClass();
+  ID.AddInteger(S->getCaptureDefault());
   for (const auto &Capture : Lambda->captures()) {
     ID.AddInteger(Capture.getCaptureKind());
+    ID.AddInteger(Capture.getCaptureQualifier());
     if (Capture.capturesVariable())
       VisitDecl(Capture.getCapturedVar());
   }

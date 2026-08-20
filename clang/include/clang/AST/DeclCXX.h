@@ -399,7 +399,7 @@ private:
 
     /// The Default Capture.
     LLVM_PREFERRED_TYPE(LambdaCaptureDefault)
-    unsigned CaptureDefault : 2;
+    unsigned CaptureDefault : 3;
 
     /// The number of captures in this lambda is limited 2^NumCaptures.
     unsigned NumCaptures : 15;

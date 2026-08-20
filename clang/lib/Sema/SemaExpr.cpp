@@ -5742,12 +5742,46 @@ struct EnsureImmediateInvocationInDefaultArgs
       : TreeTransform(SemaRef) {}
 
   bool AlwaysRebuild() { return true; }
+  bool ReplacingOriginal() { return true; }
 
-  // Lambda can only have immediate invocations in the default
-  // args of their parameters, which is transformed upon calling the closure.
-  // The body is not a subexpression, so we have nothing to do.
-  // FIXME: Immediate calls in capture initializers should be transformed.
-  ExprResult TransformLambdaExpr(LambdaExpr *E) { return E; }
+  // Lambda bodies are not subexpressions of the enclosing default initializer,
+  // but init-capture expressions are evaluated in the enclosing context. Keep
+  // the existing closure type and capture declarations so the existing body
+  // still refers to the right declarations.
+  ExprResult TransformLambdaExpr(LambdaExpr *E) {
+    SmallVector<Expr *, 4> CaptureInits(E->capture_inits());
+
+    bool Changed = false;
+    for (unsigned I = 0, N = E->capture_size(); I != N; ++I) {
+      const LambdaCapture *C = E->capture_begin() + I;
+      if (!E->isInitCapture(C))
+        continue;
+
+      auto *VD = cast<VarDecl>(C->getCapturedVar());
+      Expr *Init = CaptureInits[I];
+      ExprResult NewInit =
+          TransformInitializer(Init, VD->getInitStyle() == VarDecl::CallInit);
+      if (NewInit.isInvalid())
+        return ExprError();
+      Changed |= NewInit.get() != Init;
+      CaptureInits[I] = NewInit.get();
+    }
+
+    LambdaExpr *Lambda = E;
+    if (Changed) {
+      // Reuse the existing closure class: it owns the capture declarations,
+      // fields, and call operator body. Only the LambdaExpr's capture
+      // initializer list is replaced.
+      Lambda = LambdaExpr::Create(
+          SemaRef.Context, E->getLambdaClass(), E->getIntroducerRange(),
+          E->getCaptureDefault(), E->getCaptureDefaultLoc(),
+          E->hasExplicitParameters(), E->hasExplicitConstSpecifier(),
+          E->hasExplicitResultType(), CaptureInits, E->getEndLoc(),
+          E->containsUnexpandedParameterPack());
+    }
+
+    return SemaRef.MaybeBindToTemporary(Lambda);
+  }
   ExprResult TransformBlockExpr(BlockExpr *E) { return E; }
 
   // Make sure we don't rebuild the this pointer as it would
@@ -14104,6 +14138,21 @@ static NonConstCaptureKind isReferenceToNonConstCapture(Sema &S, Expr *E) {
 
   ValueDecl *Value = DRE->getDecl();
 
+  // A const-qualified capture is const independently of the lambda's call
+  // operator. Only use the specialized diagnostic when the call operator is
+  // what added const to an otherwise non-const capture.
+  for (FunctionScopeInfo *FSI : llvm::reverse(S.getFunctionScopes())) {
+    auto *LSI = dyn_cast<LambdaScopeInfo>(FSI);
+    if (!LSI || !LSI->isCaptured(Value))
+      continue;
+    if (LSI->getCapture(Value)
+            .getCaptureType()
+            .getNonReferenceType()
+            .isConstQualified())
+      return NCCK_None;
+    break;
+  }
+
   // The declaration must be a value which is not declared 'const'.
   if (Value->getType().isConstQualified())
     return NCCK_None;
@@ -19443,7 +19492,8 @@ static bool isVariableAlreadyCapturedInScopeInfo(CapturingScopeInfo *CSI,
     //   The type of such a data member is [...] an lvalue reference to the
     //   referenced function type if the entity is a reference to a function.
     //   [...]
-    if (Cap.isCopyCapture() && !DeclRefType->isFunctionType() &&
+    if (Cap.isCopyCapture() && !Cap.isMutableCapture() &&
+        !DeclRefType->isFunctionType() &&
         !(isa<LambdaScopeInfo>(CSI) &&
           !cast<LambdaScopeInfo>(CSI)->lambdaCaptureShouldBeConst()) &&
         !(isa<CapturedRegionScopeInfo>(CSI) &&
@@ -19662,13 +19712,20 @@ static bool captureInCapturedRegion(
 }
 
 /// Capture the given variable in the lambda.
-static bool captureInLambda(LambdaScopeInfo *LSI, ValueDecl *Var,
-                            SourceLocation Loc, const bool BuildAndDiagnose,
-                            QualType &CaptureType, QualType &DeclRefType,
-                            const bool RefersToCapturedVariable,
-                            const TryCaptureKind Kind,
-                            SourceLocation EllipsisLoc, const bool IsTopScope,
-                            Sema &S, bool Invalid) {
+static bool captureInLambda(
+    LambdaScopeInfo *LSI, ValueDecl *Var, SourceLocation Loc,
+    const bool BuildAndDiagnose, QualType &CaptureType, QualType &DeclRefType,
+    const bool RefersToCapturedVariable, const TryCaptureKind Kind,
+    SourceLocation EllipsisLoc, LambdaCaptureQualifier CaptureQualifier,
+    SourceLocation QualifierLoc, const bool IsTopScope, Sema &S, bool Invalid) {
+  LambdaCaptureQualifier EffectiveQualifier =
+      IsTopScope && Kind != TryCaptureKind::Implicit ? CaptureQualifier
+                                                     : LSI->ImpCaptureQualifier;
+  SourceLocation EffectiveQualifierLoc =
+      IsTopScope && Kind != TryCaptureKind::Implicit
+          ? QualifierLoc
+          : LSI->CaptureDefaultQualifierLoc;
+
   // Determine whether we are capturing by reference or by value.
   bool ByRef = false;
   if (IsTopScope && Kind != TryCaptureKind::Implicit) {
@@ -19697,6 +19754,8 @@ static bool captureInLambda(LambdaScopeInfo *LSI, ValueDecl *Var,
     // to do the former, while EDG does the latter. Core issue 1249 will
     // clarify, but for now we follow GCC because it's a more permissive and
     // easily defensible position.
+    if (EffectiveQualifier == LCQ_Const && !DeclRefType->isFunctionType())
+      DeclRefType.addConst();
     CaptureType = S.Context.getLValueReferenceType(DeclRefType);
   } else {
     // C++11 [expr.prim.lambda]p14:
@@ -19712,6 +19771,12 @@ static bool captureInLambda(LambdaScopeInfo *LSI, ValueDecl *Var,
     if (const ReferenceType *RefType = CaptureType->getAs<ReferenceType>()){
       if (!RefType->getPointeeType()->isFunctionType())
         CaptureType = RefType->getPointeeType();
+    }
+
+    if (EffectiveQualifier != LCQ_None && !CaptureType->isReferenceType()) {
+      CaptureType = S.Context.getUnqualifiedArrayType(CaptureType);
+      if (EffectiveQualifier == LCQ_Const)
+        CaptureType.addConst();
     }
 
     // Forbid the lambda copy-capture of autoreleasing variables.
@@ -19756,15 +19821,16 @@ static bool captureInLambda(LambdaScopeInfo *LSI, ValueDecl *Var,
     //   The type of such a data member is [...] an lvalue reference to the
     //   referenced function type if the entity is a reference to a function.
     //   [...]
-    if (Const && !CaptureType->isReferenceType() &&
-        !DeclRefType->isFunctionType())
+    if (Const && EffectiveQualifier != LCQ_Mutable &&
+        !CaptureType->isReferenceType() && !DeclRefType->isFunctionType())
       DeclRefType.addConst();
   }
 
   // Add the capture.
   if (BuildAndDiagnose)
     LSI->addCapture(Var, /*isBlock=*/false, ByRef, RefersToCapturedVariable,
-                    Loc, EllipsisLoc, CaptureType, Invalid);
+                    Loc, EllipsisLoc, CaptureType, Invalid, EffectiveQualifier,
+                    EffectiveQualifierLoc);
 
   return !Invalid;
 }
@@ -19871,10 +19937,13 @@ static void buildLambdaCaptureFixit(Sema &Sema, LambdaScopeInfo *LSI,
   }
 }
 
-bool Sema::tryCaptureVariable(
-    ValueDecl *Var, SourceLocation ExprLoc, TryCaptureKind Kind,
-    SourceLocation EllipsisLoc, bool BuildAndDiagnose, QualType &CaptureType,
-    QualType &DeclRefType, const unsigned *const FunctionScopeIndexToStopAt) {
+bool Sema::tryCaptureVariable(ValueDecl *Var, SourceLocation ExprLoc,
+                              TryCaptureKind Kind, SourceLocation EllipsisLoc,
+                              bool BuildAndDiagnose, QualType &CaptureType,
+                              QualType &DeclRefType,
+                              const unsigned *const FunctionScopeIndexToStopAt,
+                              LambdaCaptureQualifier CaptureQualifier,
+                              SourceLocation QualifierLoc) {
   // An init-capture is notionally from the context surrounding its
   // declaration, but its parent DC is the lambda class.
   DeclContext *VarDC =
@@ -20168,10 +20237,10 @@ bool Sema::tryCaptureVariable(
       Nested = true;
     } else {
       LambdaScopeInfo *LSI = cast<LambdaScopeInfo>(CSI);
-      Invalid =
-          !captureInLambda(LSI, Var, ExprLoc, BuildAndDiagnose, CaptureType,
-                           DeclRefType, Nested, Kind, EllipsisLoc,
-                           /*IsTopScope*/ I == N - 1, *this, Invalid);
+      Invalid = !captureInLambda(LSI, Var, ExprLoc, BuildAndDiagnose,
+                                 CaptureType, DeclRefType, Nested, Kind,
+                                 EllipsisLoc, CaptureQualifier, QualifierLoc,
+                                 /*IsTopScope*/ I == N - 1, *this, Invalid);
       Nested = true;
     }
 
@@ -20182,12 +20251,14 @@ bool Sema::tryCaptureVariable(
 }
 
 bool Sema::tryCaptureVariable(ValueDecl *Var, SourceLocation Loc,
-                              TryCaptureKind Kind, SourceLocation EllipsisLoc) {
+                              TryCaptureKind Kind, SourceLocation EllipsisLoc,
+                              LambdaCaptureQualifier CaptureQualifier,
+                              SourceLocation QualifierLoc) {
   QualType CaptureType;
   QualType DeclRefType;
   return tryCaptureVariable(Var, Loc, Kind, EllipsisLoc,
-                            /*BuildAndDiagnose=*/true, CaptureType,
-                            DeclRefType, nullptr);
+                            /*BuildAndDiagnose=*/true, CaptureType, DeclRefType,
+                            nullptr, CaptureQualifier, QualifierLoc);
 }
 
 bool Sema::NeedToCaptureVariable(ValueDecl *Var, SourceLocation Loc) {

@@ -88,6 +88,6 @@ auto lambda = [](int val) __attribute__((section("lambda_op_pragma"))) { return 
 namespace GH192264_original {
 struct S {};
 using F = decltype([](auto val) // expected-note {{declared here}}
-__attribute__((section("gh192264"))) const S s{}; // expected-error {{expected body of lambda expression}}
+__attribute__((section("gh192264"))) const S s{}; // expected-warning {{'const' on a lambda expression is a C++29 extension}} expected-error {{expected body of lambda expression}}
 __attribute__((section("gh192264"))) int i{}; // expected-error {{'i' causes a section type conflict with 'operator()'}}
 } // namespace GH192264_original

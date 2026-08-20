@@ -1262,9 +1262,14 @@ Expected<LambdaCapture> ASTNodeImporter::import(const LambdaCapture &From) {
     if (Error Err = importInto(EllipsisLoc, From.getEllipsisLoc()))
       return std::move(Err);
 
-  return LambdaCapture(
-      *LocationOrErr, From.isImplicit(), From.getCaptureKind(), Var,
-      EllipsisLoc);
+  SourceLocation QualifierLoc;
+  if (From.getCaptureQualifierLoc().isValid())
+    if (Error Err = importInto(QualifierLoc, From.getCaptureQualifierLoc()))
+      return std::move(Err);
+
+  return LambdaCapture(*LocationOrErr, From.isImplicit(), From.getCaptureKind(),
+                       Var, EllipsisLoc, From.getCaptureQualifier(),
+                       QualifierLoc);
 }
 
 template <typename T>
@@ -9050,11 +9055,11 @@ ExpectedStmt ASTNodeImporter::VisitLambdaExpr(LambdaExpr *E) {
   if (Err)
     return std::move(Err);
 
-  return LambdaExpr::Create(Importer.getToContext(), ToClass, ToIntroducerRange,
-                            E->getCaptureDefault(), ToCaptureDefaultLoc,
-                            E->hasExplicitParameters(),
-                            E->hasExplicitResultType(), ToCaptureInits,
-                            ToEndLoc, E->containsUnexpandedParameterPack());
+  return LambdaExpr::Create(
+      Importer.getToContext(), ToClass, ToIntroducerRange,
+      E->getCaptureDefault(), ToCaptureDefaultLoc, E->hasExplicitParameters(),
+      E->hasExplicitConstSpecifier(), E->hasExplicitResultType(),
+      ToCaptureInits, ToEndLoc, E->containsUnexpandedParameterPack());
 }
 
 

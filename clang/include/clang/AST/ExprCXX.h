@@ -1992,8 +1992,9 @@ class LambdaExpr final : public Expr,
   LambdaExpr(QualType T, SourceRange IntroducerRange,
              LambdaCaptureDefault CaptureDefault,
              SourceLocation CaptureDefaultLoc, bool ExplicitParams,
-             bool ExplicitResultType, ArrayRef<Expr *> CaptureInits,
-             SourceLocation ClosingBrace, bool ContainsUnexpandedParameterPack);
+             bool ExplicitConst, bool ExplicitResultType,
+             ArrayRef<Expr *> CaptureInits, SourceLocation ClosingBrace,
+             bool ContainsUnexpandedParameterPack);
 
   /// Construct an empty lambda expression.
   LambdaExpr(EmptyShell Empty, unsigned NumCaptures);
@@ -2012,7 +2013,7 @@ public:
   static LambdaExpr *
   Create(const ASTContext &C, CXXRecordDecl *Class, SourceRange IntroducerRange,
          LambdaCaptureDefault CaptureDefault, SourceLocation CaptureDefaultLoc,
-         bool ExplicitParams, bool ExplicitResultType,
+         bool ExplicitParams, bool ExplicitConst, bool ExplicitResultType,
          ArrayRef<Expr *> CaptureInits, SourceLocation ClosingBrace,
          bool ContainsUnexpandedParameterPack);
 
@@ -2169,6 +2170,11 @@ public:
   /// Determine whether the lambda is mutable, meaning that any
   /// captures values can be modified.
   bool isMutable() const;
+
+  /// Whether this lambda explicitly specified the const lambda-specifier.
+  bool hasExplicitConstSpecifier() const {
+    return LambdaExprBits.ExplicitConst;
+  }
 
   /// Determine whether this lambda has an explicit parameter
   /// list vs. an implicit (empty) parameter list.

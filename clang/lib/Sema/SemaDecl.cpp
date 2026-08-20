@@ -16336,10 +16336,11 @@ LambdaScopeInfo *Sema::RebuildLambdaScopeInfo(CXXMethodDecl *CallOperator) {
 
   if (LCD == LCD_None)
     LSI->ImpCaptureStyle = CapturingScopeInfo::ImpCap_None;
-  else if (LCD == LCD_ByCopy)
+  else if (isLambdaCaptureDefaultByCopy(LCD))
     LSI->ImpCaptureStyle = CapturingScopeInfo::ImpCap_LambdaByval;
-  else if (LCD == LCD_ByRef)
+  else if (isLambdaCaptureDefaultByRef(LCD))
     LSI->ImpCaptureStyle = CapturingScopeInfo::ImpCap_LambdaByref;
+  LSI->ImpCaptureQualifier = getLambdaCaptureDefaultQualifier(LCD);
   DeclarationNameInfo DNI = CallOperator->getNameInfo();
 
   LSI->IntroducerRange = DNI.getCXXOperatorNameRange();
@@ -16356,11 +16357,13 @@ LambdaScopeInfo *Sema::RebuildLambdaScopeInfo(CXXMethodDecl *CallOperator) {
       if (VD->isInitCapture())
         CurrentInstantiationScope->InstantiatedLocal(VD, VD);
       const bool ByRef = C.getCaptureKind() == LCK_ByRef;
-      LSI->addCapture(VD, /*IsBlock*/false, ByRef,
-          /*RefersToEnclosingVariableOrCapture*/true, C.getLocation(),
-          /*EllipsisLoc*/C.isPackExpansion()
-                         ? C.getEllipsisLoc() : SourceLocation(),
-          I->getType(), /*Invalid*/false);
+      LSI->addCapture(VD, /*IsBlock*/ false, ByRef,
+                      /*RefersToEnclosingVariableOrCapture*/ true,
+                      C.getLocation(),
+                      /*EllipsisLoc*/ C.isPackExpansion() ? C.getEllipsisLoc()
+                                                          : SourceLocation(),
+                      I->getType(), /*Invalid*/ false, C.getCaptureQualifier(),
+                      C.getCaptureQualifierLoc());
 
     } else if (C.capturesThis()) {
       LSI->addThisCapture(/*Nested*/ false, C.getLocation(), I->getType(),

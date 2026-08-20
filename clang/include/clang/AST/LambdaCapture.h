@@ -50,6 +50,10 @@ class LambdaCapture {
 
   SourceLocation Loc;
   SourceLocation EllipsisLoc;
+  SourceLocation QualifierLoc;
+
+  LLVM_PREFERRED_TYPE(LambdaCaptureQualifier)
+  unsigned Qualifier : 2;
 
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
@@ -72,7 +76,9 @@ public:
   /// location to indicate that this is not a pack expansion.
   LambdaCapture(SourceLocation Loc, bool Implicit, LambdaCaptureKind Kind,
                 ValueDecl *Var = nullptr,
-                SourceLocation EllipsisLoc = SourceLocation());
+                SourceLocation EllipsisLoc = SourceLocation(),
+                LambdaCaptureQualifier Qualifier = LCQ_None,
+                SourceLocation QualifierLoc = SourceLocation());
 
   /// Determine the kind of capture.
   LambdaCaptureKind getCaptureKind() const;
@@ -115,6 +121,15 @@ public:
   /// Determine whether this was an explicit capture (written
   /// between the square brackets introducing the lambda).
   bool isExplicit() const { return !isImplicit(); }
+
+  LambdaCaptureQualifier getCaptureQualifier() const {
+    return static_cast<LambdaCaptureQualifier>(Qualifier);
+  }
+
+  bool isConstCapture() const { return getCaptureQualifier() == LCQ_Const; }
+  bool isMutableCapture() const { return getCaptureQualifier() == LCQ_Mutable; }
+
+  SourceLocation getCaptureQualifierLoc() const { return QualifierLoc; }
 
   /// Retrieve the source location of the capture.
   ///

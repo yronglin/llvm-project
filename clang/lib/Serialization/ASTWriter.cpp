@@ -7491,7 +7491,7 @@ void ASTRecordWriter::AddCXXDefinitionData(const CXXRecordDecl *D) {
     BitsPacker LambdaBits;
     LambdaBits.addBits(Lambda.DependencyKind, /*Width=*/2);
     LambdaBits.addBit(Lambda.IsGenericLambda);
-    LambdaBits.addBits(Lambda.CaptureDefault, /*Width=*/2);
+    LambdaBits.addBits(Lambda.CaptureDefault, /*Width=*/3);
     LambdaBits.addBits(Lambda.NumCaptures, /*Width=*/15);
     LambdaBits.addBit(Lambda.HasKnownInternalLinkage);
     Record->push_back(LambdaBits);
@@ -7509,7 +7509,9 @@ void ASTRecordWriter::AddCXXDefinitionData(const CXXRecordDecl *D) {
       BitsPacker CaptureBits;
       CaptureBits.addBit(Capture.isImplicit());
       CaptureBits.addBits(Capture.getCaptureKind(), /*Width=*/3);
+      CaptureBits.addBits(Capture.getCaptureQualifier(), /*Width=*/2);
       Record->push_back(CaptureBits);
+      AddSourceLocation(Capture.getCaptureQualifierLoc());
 
       switch (Capture.getCaptureKind()) {
       case LCK_StarThis:

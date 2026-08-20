@@ -591,10 +591,11 @@ void Sema::buildLambdaScope(LambdaScopeInfo *LSI, CXXMethodDecl *CallOperator,
   LSI->CallOperator = CallOperator;
   CXXRecordDecl *LambdaClass = CallOperator->getParent();
   LSI->Lambda = LambdaClass;
-  if (CaptureDefault == LCD_ByCopy)
+  if (isLambdaCaptureDefaultByCopy(CaptureDefault))
     LSI->ImpCaptureStyle = LambdaScopeInfo::ImpCap_LambdaByval;
-  else if (CaptureDefault == LCD_ByRef)
+  else if (isLambdaCaptureDefaultByRef(CaptureDefault))
     LSI->ImpCaptureStyle = LambdaScopeInfo::ImpCap_LambdaByref;
+  LSI->ImpCaptureQualifier = getLambdaCaptureDefaultQualifier(CaptureDefault);
   LSI->CaptureDefaultLoc = CaptureDefaultLoc;
   LSI->IntroducerRange = IntroducerRange;
   LSI->ExplicitParams = ExplicitParams;
@@ -844,15 +845,19 @@ void Sema::deduceClosureReturnType(CapturingScopeInfo &CSI) {
 }
 
 QualType Sema::buildLambdaInitCaptureInitialization(
-    SourceLocation Loc, bool ByRef, SourceLocation EllipsisLoc,
-    UnsignedOrNone NumExpansions, IdentifierInfo *Id, bool IsDirectInit,
-    Expr *&Init) {
+    SourceLocation Loc, bool ByRef, LambdaCaptureQualifier Qualifier,
+    SourceLocation EllipsisLoc, UnsignedOrNone NumExpansions,
+    IdentifierInfo *Id, bool IsDirectInit, Expr *&Init) {
   // Create an 'auto' or 'auto&' TypeSourceInfo that we can use to
   // deduce against.
   QualType DeductType = Context.getAutoDeductType();
   TypeLocBuilder TLB;
   AutoTypeLoc TL = TLB.push<AutoTypeLoc>(DeductType);
   TL.setNameLoc(Loc);
+  if (Qualifier == LCQ_Const) {
+    DeductType = Context.getConstType(DeductType);
+    TLB.TypeWasModifiedSafely(DeductType);
+  }
   if (ByRef) {
     DeductType = BuildReferenceType(DeductType, true, Loc, Id);
     assert(!DeductType.isNull() && "can't build reference to auto");
@@ -935,11 +940,13 @@ VarDecl *Sema::createLambdaInitCaptureVarDecl(
   return NewVD;
 }
 
-void Sema::addInitCapture(LambdaScopeInfo *LSI, VarDecl *Var, bool ByRef) {
+void Sema::addInitCapture(LambdaScopeInfo *LSI, VarDecl *Var, bool ByRef,
+                          LambdaCaptureQualifier Qualifier,
+                          SourceLocation QualifierLoc) {
   assert(Var->isInitCapture() && "init capture flag should be set");
   LSI->addCapture(Var, /*isBlock=*/false, ByRef,
                   /*isNested=*/false, Var->getLocation(), SourceLocation(),
-                  Var->getType(), /*Invalid=*/false);
+                  Var->getType(), /*Invalid=*/false, Qualifier, QualifierLoc);
 }
 
 // Unlike getCurLambda, getCurrentLambdaScopeUnsafe doesn't
@@ -1128,11 +1135,13 @@ void Sema::ActOnLambdaExpressionAfterIntroducer(LambdaIntroducer &Intro,
   LambdaScopeInfo *LSI = getCurLambda();
   assert(LSI && "LambdaScopeInfo should be on stack!");
 
-  if (Intro.Default == LCD_ByCopy)
+  if (isLambdaCaptureDefaultByCopy(Intro.Default))
     LSI->ImpCaptureStyle = LambdaScopeInfo::ImpCap_LambdaByval;
-  else if (Intro.Default == LCD_ByRef)
+  else if (isLambdaCaptureDefaultByRef(Intro.Default))
     LSI->ImpCaptureStyle = LambdaScopeInfo::ImpCap_LambdaByref;
+  LSI->ImpCaptureQualifier = getLambdaCaptureDefaultQualifier(Intro.Default);
   LSI->CaptureDefaultLoc = Intro.DefaultLoc;
+  LSI->CaptureDefaultQualifierLoc = Intro.DefaultQualifierLoc;
   LSI->IntroducerRange = Intro.Range;
   LSI->AfterParameterList = false;
 
@@ -1288,15 +1297,22 @@ void Sema::ActOnLambdaExpressionAfterIntroducer(LambdaIntroducer &Intro,
       //   identifiers in the lambda-capture shall not be preceded by &.
       //   If a lambda-capture includes a capture-default that is =, [...]
       //   each identifier it contains shall be preceded by &.
-      if (C->Kind == LCK_ByRef && Intro.Default == LCD_ByRef) {
-        Diag(C->Loc, diag::err_reference_capture_with_reference_default)
-            << FixItHint::CreateRemoval(
-                SourceRange(getLocForEndOfToken(PrevCaptureLoc), C->Loc));
-        continue;
-      } else if (C->Kind == LCK_ByCopy && Intro.Default == LCD_ByCopy) {
-        Diag(C->Loc, diag::err_copy_capture_with_copy_default)
-            << FixItHint::CreateRemoval(
-                SourceRange(getLocForEndOfToken(PrevCaptureLoc), C->Loc));
+      bool DefaultByRef = isLambdaCaptureDefaultByRef(Intro.Default);
+      bool SameKind =
+          DefaultByRef ? C->Kind == LCK_ByRef : C->Kind == LCK_ByCopy;
+      bool SameQualifier =
+          C->Qualifier == getLambdaCaptureDefaultQualifier(Intro.Default);
+      if (Intro.Default != LCD_None && SameKind && SameQualifier) {
+        auto Removal = FixItHint::CreateRemoval(
+            SourceRange(getLocForEndOfToken(PrevCaptureLoc), C->Loc));
+        if (Intro.Default == LCD_ByRef)
+          Diag(C->Loc, diag::err_reference_capture_with_reference_default)
+              << Removal;
+        else if (Intro.Default == LCD_ByCopy)
+          Diag(C->Loc, diag::err_copy_capture_with_copy_default) << Removal;
+        else
+          Diag(C->Loc, diag::err_lambda_capture_redundant_with_default)
+              << C->Id << Removal;
         continue;
       }
 
@@ -1389,12 +1405,14 @@ void Sema::ActOnLambdaExpressionAfterIntroducer(LambdaIntroducer &Intro,
     }
 
     if (C->Init.isUsable()) {
-      addInitCapture(LSI, cast<VarDecl>(Var), C->Kind == LCK_ByRef);
+      addInitCapture(LSI, cast<VarDecl>(Var), C->Kind == LCK_ByRef,
+                     C->Qualifier, C->QualifierLoc);
     } else {
       TryCaptureKind Kind = C->Kind == LCK_ByRef
                                 ? TryCaptureKind::ExplicitByRef
                                 : TryCaptureKind::ExplicitByVal;
-      tryCaptureVariable(Var, C->Loc, Kind, EllipsisLoc);
+      tryCaptureVariable(Var, C->Loc, Kind, EllipsisLoc, C->Qualifier,
+                         C->QualifierLoc);
     }
     if (!LSI->Captures.empty())
       LSI->ExplicitCaptureRanges[LSI->Captures.size() - 1] = C->ExplicitRange;
@@ -1405,10 +1423,14 @@ void Sema::ActOnLambdaExpressionAfterIntroducer(LambdaIntroducer &Intro,
 }
 
 void Sema::ActOnLambdaClosureQualifiers(LambdaIntroducer &Intro,
-                                        SourceLocation MutableLoc) {
+                                        SourceLocation MutableLoc,
+                                        SourceLocation ConstLoc) {
 
   LambdaScopeInfo *LSI = getCurrentLambdaScopeUnsafe(*this);
   LSI->Mutable = MutableLoc.isValid();
+  LSI->ExplicitConst = ConstLoc.isValid();
+  if (ConstLoc.isValid() && LSI->ExplicitObjectParameter)
+    Diag(ConstLoc, diag::err_const_lambda_explicit_object_parameter);
   ContextRAII Context(*this, LSI->CallOperator, /*NewThisContext*/ false);
 
   // C++11 [expr.prim.lambda]p9:
@@ -2029,15 +2051,18 @@ ExprResult Sema::ActOnLambdaExpr(SourceLocation StartLoc, Stmt *Body) {
 }
 
 static LambdaCaptureDefault
-mapImplicitCaptureStyle(CapturingScopeInfo::ImplicitCaptureStyle ICS) {
+mapImplicitCaptureStyle(CapturingScopeInfo::ImplicitCaptureStyle ICS,
+                        LambdaCaptureQualifier Qualifier) {
   switch (ICS) {
   case CapturingScopeInfo::ImpCap_None:
     return LCD_None;
   case CapturingScopeInfo::ImpCap_LambdaByval:
-    return LCD_ByCopy;
+    return Qualifier == LCQ_Const     ? LCD_ByConstCopy
+           : Qualifier == LCQ_Mutable ? LCD_ByMutableCopy
+                                      : LCD_ByCopy;
   case CapturingScopeInfo::ImpCap_CapturedRegion:
   case CapturingScopeInfo::ImpCap_LambdaByref:
-    return LCD_ByRef;
+    return Qualifier == LCQ_Const ? LCD_ByConstRef : LCD_ByRef;
   case CapturingScopeInfo::ImpCap_Block:
     llvm_unreachable("block capture in lambda");
   }
@@ -2119,10 +2144,11 @@ FieldDecl *Sema::BuildCaptureField(RecordDecl *RD,
     TSI = Context.getTrivialTypeSourceInfo(FieldType, Loc);
 
   // Build the non-static data member.
-  FieldDecl *Field =
-      FieldDecl::Create(Context, RD, /*StartLoc=*/Loc, /*IdLoc=*/Loc,
-                        /*Id=*/nullptr, FieldType, TSI, /*BW=*/nullptr,
-                        /*Mutable=*/false, ICIS_NoInit);
+  FieldDecl *Field = FieldDecl::Create(
+      Context, RD, /*StartLoc=*/Loc, /*IdLoc=*/Loc,
+      /*Id=*/nullptr, FieldType, TSI, /*BW=*/nullptr,
+      /*Mutable=*/Capture.isMutableCapture() && !FieldType->isReferenceType(),
+      ICIS_NoInit);
   // If the variable being captured has an invalid type, mark the class as
   // invalid as well.
   if (!FieldType->isDependentType()) {
@@ -2190,7 +2216,7 @@ ExprResult Sema::BuildLambdaExpr(SourceLocation StartLoc,
   SmallVector<Expr *, 4> CaptureInits;
   SourceLocation CaptureDefaultLoc = LSI->CaptureDefaultLoc;
   LambdaCaptureDefault CaptureDefault =
-      mapImplicitCaptureStyle(LSI->ImpCaptureStyle);
+      mapImplicitCaptureStyle(LSI->ImpCaptureStyle, LSI->ImpCaptureQualifier);
   CXXRecordDecl *Class = LSI->Lambda;
   CXXMethodDecl *CallOperator = LSI->CallOperator;
   SourceRange IntroducerRange = LSI->IntroducerRange;
@@ -2285,7 +2311,8 @@ ExprResult Sema::BuildLambdaExpr(SourceLocation StartLoc,
         ValueDecl *Var = From.getVariable();
         LambdaCaptureKind Kind = From.isCopyCapture() ? LCK_ByCopy : LCK_ByRef;
         return LambdaCapture(From.getLocation(), IsImplicit, Kind, Var,
-                             From.getEllipsisLoc());
+                             From.getEllipsisLoc(), From.getCaptureQualifier(),
+                             From.getCaptureQualifierLoc());
       }
     }();
 
@@ -2332,10 +2359,10 @@ ExprResult Sema::BuildLambdaExpr(SourceLocation StartLoc,
 
   Cleanup.mergeFrom(LambdaCleanup);
 
-  LambdaExpr *Lambda =
-      LambdaExpr::Create(Context, Class, IntroducerRange, CaptureDefault,
-                         CaptureDefaultLoc, ExplicitParams, ExplicitResultType,
-                         CaptureInits, EndLoc, ContainsUnexpandedParameterPack);
+  LambdaExpr *Lambda = LambdaExpr::Create(
+      Context, Class, IntroducerRange, CaptureDefault, CaptureDefaultLoc,
+      ExplicitParams, LSI->ExplicitConst, ExplicitResultType, CaptureInits,
+      EndLoc, ContainsUnexpandedParameterPack);
 
   // If the lambda expression's call operator is not explicitly marked constexpr
   // and is not dependent, analyze the call operator to infer

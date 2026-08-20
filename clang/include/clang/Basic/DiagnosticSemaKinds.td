@@ -8969,6 +8969,10 @@ let CategoryName = "Lambda Issue" in {
   def note_lambda_to_block_conv : Note<
     "implicit capture of lambda object due to conversion to block pointer "
     "here">;
+  def err_lambda_capture_redundant_with_default : Error<
+    "explicit capture of %0 is redundant with the capture default">;
+  def err_const_lambda_explicit_object_parameter : Error<
+    "a lambda with an explicit object parameter cannot be const">;
   def note_var_explicitly_captured_here : Note<"variable %0 is"
     "%select{| explicitly}1 captured here">;
 

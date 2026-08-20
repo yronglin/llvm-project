@@ -2885,6 +2885,8 @@ struct LambdaIntroducer {
   /// An individual capture in a lambda introducer.
   struct LambdaCapture {
     LambdaCaptureKind Kind;
+    LambdaCaptureQualifier Qualifier;
+    SourceLocation QualifierLoc;
     SourceLocation Loc;
     IdentifierInfo *Id;
     SourceLocation EllipsisLoc;
@@ -2893,18 +2895,20 @@ struct LambdaIntroducer {
     ParsedType InitCaptureType;
     SourceRange ExplicitRange;
 
-    LambdaCapture(LambdaCaptureKind Kind, SourceLocation Loc,
+    LambdaCapture(LambdaCaptureKind Kind, LambdaCaptureQualifier Qualifier,
+                  SourceLocation QualifierLoc, SourceLocation Loc,
                   IdentifierInfo *Id, SourceLocation EllipsisLoc,
                   LambdaCaptureInitKind InitKind, ExprResult Init,
-                  ParsedType InitCaptureType,
-                  SourceRange ExplicitRange)
-        : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc),
-          InitKind(InitKind), Init(Init), InitCaptureType(InitCaptureType),
+                  ParsedType InitCaptureType, SourceRange ExplicitRange)
+        : Kind(Kind), Qualifier(Qualifier), QualifierLoc(QualifierLoc),
+          Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc), InitKind(InitKind),
+          Init(Init), InitCaptureType(InitCaptureType),
           ExplicitRange(ExplicitRange) {}
   };
 
   SourceRange Range;
   SourceLocation DefaultLoc;
+  SourceLocation DefaultQualifierLoc;
   LambdaCaptureDefault Default = LCD_None;
   SmallVector<LambdaCapture, 4> Captures;
 
@@ -2915,15 +2919,13 @@ struct LambdaIntroducer {
   }
 
   /// Append a capture in a lambda introducer.
-  void addCapture(LambdaCaptureKind Kind,
-                  SourceLocation Loc,
-                  IdentifierInfo* Id,
-                  SourceLocation EllipsisLoc,
-                  LambdaCaptureInitKind InitKind,
-                  ExprResult Init,
-                  ParsedType InitCaptureType,
-                  SourceRange ExplicitRange) {
-    Captures.push_back(LambdaCapture(Kind, Loc, Id, EllipsisLoc, InitKind, Init,
+  void addCapture(LambdaCaptureKind Kind, LambdaCaptureQualifier Qualifier,
+                  SourceLocation QualifierLoc, SourceLocation Loc,
+                  IdentifierInfo *Id, SourceLocation EllipsisLoc,
+                  LambdaCaptureInitKind InitKind, ExprResult Init,
+                  ParsedType InitCaptureType, SourceRange ExplicitRange) {
+    Captures.push_back(LambdaCapture(Kind, Qualifier, QualifierLoc, Loc, Id,
+                                     EllipsisLoc, InitKind, Init,
                                      InitCaptureType, ExplicitRange));
   }
 };

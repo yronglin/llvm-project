@@ -1346,8 +1346,9 @@ bool Sema::CheckCXXThisCapture(SourceLocation Loc, const bool Explicit,
         }
         return true;
       }
-      if (CSI->ImpCaptureStyle == CapturingScopeInfo::ImpCap_LambdaByref ||
-          CSI->ImpCaptureStyle == CapturingScopeInfo::ImpCap_LambdaByval ||
+      if (((CSI->ImpCaptureStyle == CapturingScopeInfo::ImpCap_LambdaByref ||
+            CSI->ImpCaptureStyle == CapturingScopeInfo::ImpCap_LambdaByval) &&
+           (!LSI || LSI->ImpCaptureQualifier == LCQ_None)) ||
           CSI->ImpCaptureStyle == CapturingScopeInfo::ImpCap_Block ||
           CSI->ImpCaptureStyle == CapturingScopeInfo::ImpCap_CapturedRegion ||
           (Explicit && idx == MaxFunctionScopesIndex)) {

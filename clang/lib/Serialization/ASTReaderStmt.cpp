@@ -1875,6 +1875,7 @@ void ASTStmtReader::VisitLambdaExpr(LambdaExpr *E) {
   E->LambdaExprBits.CaptureDefault = Record.readInt();
   E->CaptureDefaultLoc = readSourceLocation();
   E->LambdaExprBits.ExplicitParams = Record.readInt();
+  E->LambdaExprBits.ExplicitConst = Record.readInt();
   E->LambdaExprBits.ExplicitResultType = Record.readInt();
   E->ClosingBrace = readSourceLocation();
 

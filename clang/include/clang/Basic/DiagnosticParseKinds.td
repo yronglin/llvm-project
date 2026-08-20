@@ -1133,8 +1133,20 @@ def ext_lambda : ExtWarn<"lambdas are a %select{C++11|clang HLSL}0 extension">,
 def ext_hlsl_lambda : ExtWarn<ext_lambda.Summary>,
   InGroup<HLSLExtension>;
 def err_lambda_decl_specifier_repeated : Error<
-  "%select{'mutable'|'static'|'constexpr'|'consteval'}0 cannot "
+  "%select{'mutable'|'static'|'constexpr'|'consteval'|'const'}0 cannot "
   "appear multiple times in a lambda declarator">;
+def ext_const_mutable_lambda_capture : ExtWarn<
+  "const and mutable lambda captures are a C++29 extension">,
+  InGroup<CXX29>;
+def ext_const_lambda_specifier : ExtWarn<
+  "'const' on a lambda expression is a C++29 extension">,
+  InGroup<CXX29>;
+def err_lambda_capture_qualifier_repeated : Error<
+  "lambda capture cannot be qualified by both 'const' and 'mutable'">;
+def err_mutable_reference_capture : Error<
+  "a lambda capture by reference cannot be 'mutable'">;
+def err_qualified_this_capture : Error<
+  "capture of %select{'this'|'*this'}0 cannot be qualified by %1">;
 def err_lambda_capture_misplaced_ellipsis : Error<
   "ellipsis in pack %select{|init-}0capture must appear %select{after|before}0 "
   "the name of the capture">;
@@ -1192,6 +1204,10 @@ def warn_cxx20_compat_static_lambda : Warning<
   InGroup<CXXPre23Compat>, DefaultIgnore;
 def err_static_mutable_lambda : Error<
   "lambda cannot be both mutable and static">;
+def err_const_mutable_lambda : Error<
+  "lambda cannot be both const and mutable">;
+def err_const_static_lambda : Error<
+  "lambda cannot be both const and static">;
 def err_static_lambda_captures : Error<
   "a static lambda cannot have any captures">;
 
