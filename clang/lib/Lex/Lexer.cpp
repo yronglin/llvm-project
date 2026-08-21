@@ -34,6 +34,7 @@
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/NativeFormatting.h"
+#include "llvm/Support/SIMD.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/Unicode.h"
 #include "llvm/Support/UnicodeCharRanges.h"
@@ -46,10 +47,6 @@
 #include <limits>
 #include <optional>
 #include <string>
-
-#if LLVM_IS_X86
-#include <nmmintrin.h>
-#endif
 
 using namespace clang;
 
@@ -1993,42 +1990,38 @@ static const char *fastParseASCIIIdentifierScalar(const char *CurPtr) {
   return CurPtr;
 }
 
-#if LLVM_IS_X86
-// Fast path for lexing ASCII identifiers using SSE4.2 instructions.
-LLVM_TARGET_SSE42 static const char *
-fastParseASCIIIdentifierSSE42(const char *CurPtr, const char *BufferEnd) {
-  alignas(16) static constexpr char AsciiIdentifierRange[16] = {
-      '_', '_', 'A', 'Z', 'a', 'z', '0', '9',
-  };
-  constexpr ssize_t BytesPerRegister = 16;
-
-  __m128i AsciiIdentifierRangeV =
-      _mm_load_si128(reinterpret_cast<const __m128i *>(AsciiIdentifierRange));
+// Fast path for lexing ASCII identifiers using llvm::simd.
+static const char *fastParseASCIIIdentifierSIMD(const char *CurPtr,
+                                                const char *BufferEnd) {
+  using CharVec = llvm::simd::vec<char>;
+  constexpr auto BytesPerRegister = CharVec::size();
+  const CharVec Underscore('_');
+  const CharVec UpperA('A');
+  const CharVec UpperZ('Z');
+  const CharVec LowerA('a');
+  const CharVec LowerZ('z');
+  const CharVec Digit0('0');
+  const CharVec Digit9('9');
 
   while (LLVM_LIKELY(BufferEnd - CurPtr >= BytesPerRegister)) {
-    __m128i Cv = _mm_loadu_si128(reinterpret_cast<const __m128i *>(CurPtr));
-
-    const int Consumed =
-        _mm_cmpistri(AsciiIdentifierRangeV, Cv,
-                     _SIDD_LEAST_SIGNIFICANT | _SIDD_CMP_RANGES |
-                         _SIDD_UBYTE_OPS | _SIDD_NEGATIVE_POLARITY);
-    CurPtr += Consumed;
-    if (Consumed == BytesPerRegister)
+    const CharVec C =
+        llvm::simd::unchecked_load<CharVec>(CurPtr, BytesPerRegister);
+    const auto IsIdentifier =
+        (C == Underscore) | ((C >= UpperA) & (C <= UpperZ)) |
+        ((C >= LowerA) & (C <= LowerZ)) | ((C >= Digit0) & (C <= Digit9));
+    if (llvm::simd::all_of(IsIdentifier)) {
+      CurPtr += BytesPerRegister;
       continue;
-    return CurPtr;
+    }
+    return CurPtr + llvm::simd::reduce_min_index(!IsIdentifier);
   }
 
   return fastParseASCIIIdentifierScalar(CurPtr);
 }
-#endif
 
 static const char *fastParseASCIIIdentifier(const char *CurPtr,
                                             const char *BufferEnd) {
-#if LLVM_IS_X86
-  if (LLVM_LIKELY(LLVM_CPU_SUPPORTS_SSE42))
-    return fastParseASCIIIdentifierSSE42(CurPtr, BufferEnd);
-#endif
-  return fastParseASCIIIdentifierScalar(CurPtr);
+  return fastParseASCIIIdentifierSIMD(CurPtr, BufferEnd);
 }
 
 bool Lexer::LexIdentifierContinue(Token &Result, const char *CurPtr) {

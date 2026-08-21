@@ -13,7 +13,28 @@ add_benchmark(GetIntrinsicInfoTableEntriesBM GetIntrinsicInfoTableEntriesBM.cpp 
 add_benchmark(SandboxIRBench SandboxIRBench.cpp PARTIAL_SOURCES_INTENDED)
 add_benchmark(MustacheBench Mustache.cpp PARTIAL_SOURCES_INTENDED)
 add_benchmark(SpecialCaseListBM SpecialCaseListBM.cpp PARTIAL_SOURCES_INTENDED)
+add_benchmark(SIMDIdentifierBenchmark SIMDIdentifierBenchmark.cpp
+  PARTIAL_SOURCES_INTENDED)
 add_benchmark(DWARFVerifierBM DWARFVerifierBM.cpp PARTIAL_SOURCES_INTENDED)
+
+if(LLVM_NATIVE_ARCH STREQUAL "X86")
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-msse4.2" LLVM_BENCHMARK_HAS_MSSE42)
+  check_cxx_compiler_flag("-mavx512bw" LLVM_BENCHMARK_HAS_MAVX512BW)
+
+  if(LLVM_BENCHMARK_HAS_MSSE42)
+    add_benchmark(SIMDIdentifierSSE42Benchmark SIMDIdentifierBenchmark.cpp
+      DISABLE_PCH_REUSE PARTIAL_SOURCES_INTENDED)
+    target_compile_options(SIMDIdentifierSSE42Benchmark PRIVATE -msse4.2)
+  endif()
+
+  if(LLVM_BENCHMARK_HAS_MAVX512BW)
+    add_benchmark(SIMDIdentifierAVX512Benchmark SIMDIdentifierBenchmark.cpp
+      DISABLE_PCH_REUSE PARTIAL_SOURCES_INTENDED)
+    target_compile_options(SIMDIdentifierAVX512Benchmark PRIVATE -mavx512bw)
+  endif()
+endif()
+
 add_benchmark(PointerUnionBM PointerUnionBM.cpp PARTIAL_SOURCES_INTENDED)
 add_benchmark(ImmutableSetIteratorBM ImmutableSetIteratorBM.cpp PARTIAL_SOURCES_INTENDED)
 add_benchmark(ImmutableSetBuildBM ImmutableSetBuildBM.cpp PARTIAL_SOURCES_INTENDED)
