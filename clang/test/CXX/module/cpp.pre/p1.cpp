@@ -44,6 +44,8 @@
 // RUN: %clang_cc1 -std=c++20 %t/header_name4.cpp -fsyntax-only -verify
 // RUN: %clang_cc1 -std=c++20 %t/header_name5.cpp -fsyntax-only -verify
 // RUN: %clang_cc1 -std=c++20 %t/header_name6.cpp -fsyntax-only -verify
+// RUN: %clang_cc1 -std=c++20 %t/gmf.cpp -fsyntax-only -verify
+
 //--- hash.cpp
 // expected-no-diagnostics
 #                       // preprocessing directive
@@ -254,3 +256,13 @@ import <:FOO
 export module M;
 #define HEADER vector>
 import <HEADER; // expected-error {{file not found}}
+
+//--- gmf.cpp
+// expected-no-diagnostics
+int foo(int v1, int v2) {
+	int a, b,
+    module;
+	module = v1 * v2;
+	return module;
+}
+

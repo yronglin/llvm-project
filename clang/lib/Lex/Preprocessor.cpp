@@ -1422,7 +1422,16 @@ bool Preprocessor::HandleModuleContextualKeyword(Token &Result) {
     if (auto NextTok = peekNextPPToken()) {
       if (NextTok->is(tok::raw_identifier))
         LookUpIdentifierInfo(*NextTok);
-      if (NextTok->isOneOf(tok::identifier, tok::colon, tok::semi)) {
+
+      SourceLocation DirectiveLoc = LastExportKeyword.is(tok::kw_export)
+                                        ? LastExportKeyword.getLocation()
+                                        : Result.getLocation();
+      bool IsGMFIntroducerPos =
+          DirectiveLoc == FirstPPTokenLoc || isPreprocessedModuleFile() ||
+          (HasSynthesizedGMF &&
+           SourceMgr.getFileID(Result.getLocation()) == PredefinesFileID);
+      if (NextTok->isOneOf(tok::identifier, tok::colon) ||
+          (IsGMFIntroducerPos && NextTok->is(tok::semi))) {
         Result.setKind(tok::kw_module);
         ModuleDeclLoc = Result.getLocation();
         return true;
