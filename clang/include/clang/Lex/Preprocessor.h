@@ -501,8 +501,11 @@ private:
 
     /// Saw an 'export' identifier.
     void handleExport() {
-      // The presence of an 'export' keyword always ends or excludes a GMF.
-      S = GMFAbsentOrEnded;
+      // The presence of an 'export' keyword always ends or excludes a GMF,
+      // except a leading one: 'export module;' is still a (misplaced) GMF
+      // introducer.
+      if (S != BeforeGMFIntroducer)
+        S = GMFAbsentOrEnded;
     }
 
     /// Saw an 'import' identifier.
@@ -530,7 +533,18 @@ private:
         S = GMFAbsentOrEnded;
     }
 
+    /// Saw a token other than 'export' or 'module'. A 'module;' after it is
+    /// not at the start of the translation unit.
+    void handleLeadingToken() {
+      if (S == BeforeGMFIntroducer)
+        S = GMFAbsentOrEnded;
+    }
+
     bool inGMF() { return S == GMFActive; }
+
+    /// Whether 'module' at this point would be the first token, or follow
+    /// only a leading 'export'.
+    bool atGMFIntroducer() const { return S == BeforeGMFIntroducer; }
 
   private:
     /// Track the transitions into and out of a Global Module Fragment,
@@ -3200,6 +3214,10 @@ public:
   /// Whether we've seen pp-directives which may have changed the preprocessing
   /// state.
   bool hasSeenNoTrivialPPDirective() const;
+
+  /// Whether a 'module' here is at the start of the translation unit:
+  /// preceded only by trivial directives and, optionally, 'export'.
+  bool isAtGMFIntroducerPosition() const;
 
 private:
   /// Helper functions to forward lexing to the actual lexer. They all share the

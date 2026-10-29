@@ -44,6 +44,14 @@
 // RUN: %clang_cc1 -std=c++20 %t/header_name4.cpp -fsyntax-only -verify
 // RUN: %clang_cc1 -std=c++20 %t/header_name5.cpp -fsyntax-only -verify
 // RUN: %clang_cc1 -std=c++20 %t/header_name6.cpp -fsyntax-only -verify
+// RUN: %clang_cc1 -std=c++20 %t/gmf.cpp -fsyntax-only -verify
+// RUN: %clang_cc1 -std=c++20 %t/gmf_after_linemarker.cppm -fsyntax-only -verify
+// RUN: %clang_cc1 -std=c++20 %t/gmf_after_line.cppm -fsyntax-only -verify
+// RUN: %clang_cc1 -std=c++20 %t/gmf_after_pragma.cppm -fsyntax-only -verify
+// RUN: %clang_cc1 -std=c++20 %t/gmf_after_define.cppm -fsyntax-only -verify
+// RUN: not %clang_cc1 -std=c++20 %t/gmf_after_define.cppm -fsyntax-only \
+// RUN:   -fdiagnostics-parseable-fixits 2>&1 | FileCheck %t/gmf_after_define.cppm
+
 //--- hash.cpp
 // expected-no-diagnostics
 #                       // preprocessing directive
@@ -254,3 +262,39 @@ import <:FOO
 export module M;
 #define HEADER vector>
 import <HEADER; // expected-error {{file not found}}
+
+//--- gmf.cpp
+// expected-no-diagnostics
+int foo(int v1, int v2) {
+	int a, b,
+    module;
+	module = v1 * v2;
+	return module;
+}
+
+//--- gmf_after_linemarker.cppm
+// expected-no-diagnostics
+# 1 "gmf_after_linemarker.cppm" 1 3
+module;
+export module M;
+
+//--- gmf_after_line.cppm
+// expected-no-diagnostics
+#line 10
+module;
+export module M;
+
+//--- gmf_after_pragma.cppm
+// expected-no-diagnostics
+#pragma clang diagnostic push
+module;
+export module M;
+
+//--- gmf_after_define.cppm
+#define X
+module; // expected-error {{'module;' introducing a global module fragment can appear only at the start of the translation unit}}
+        // expected-note@1 {{move 'module;' to the start of the file to introduce a global module fragment}}
+export module M;
+
+// CHECK: fix-it:"{{.*}}gmf_after_define.cppm":{1:1-1:1}:"module;\n"
+// CHECK: fix-it:"{{.*}}gmf_after_define.cppm":{2:1-2:9}:""

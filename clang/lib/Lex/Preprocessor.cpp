@@ -1003,6 +1003,11 @@ void Preprocessor::Lex(Token &Result) {
   // depends on the prevailing StdCXXImportSeq state in two cases.
   if (getLangOpts().CPlusPlusModules && LexLevel == 1 &&
       !Result.getFlag(Token::IsReinjected)) {
+    // Pragma annotations stand for trivial directives, not leading tokens.
+    if (!Result.isOneOf(tok::kw_export, tok::kw_module, tok::eof) &&
+        !Result.isAnnotation())
+      TrackGMFState.handleLeadingToken();
+
     switch (Result.getKind()) {
     case tok::l_paren: case tok::l_square: case tok::l_brace:
       StdCXXImportSeqState.handleOpenBracket();
@@ -1422,7 +1427,13 @@ bool Preprocessor::HandleModuleContextualKeyword(Token &Result) {
     if (auto NextTok = peekNextPPToken()) {
       if (NextTok->is(tok::raw_identifier))
         LookUpIdentifierInfo(*NextTok);
-      if (NextTok->isOneOf(tok::identifier, tok::colon, tok::semi)) {
+
+      bool IsGMFIntroducerPos =
+          isAtGMFIntroducerPosition() ||
+          (HasSynthesizedGMF &&
+           SourceMgr.getFileID(Result.getLocation()) == PredefinesFileID);
+      if (NextTok->isOneOf(tok::identifier, tok::colon) ||
+          (IsGMFIntroducerPos && NextTok->is(tok::semi))) {
         Result.setKind(tok::kw_module);
         ModuleDeclLoc = Result.getLocation();
         return true;
@@ -1824,6 +1835,10 @@ const char *Preprocessor::getCheckPoint(FileID FID, const char *Start) const {
 
 bool Preprocessor::hasSeenNoTrivialPPDirective() const {
   return DirTracer && DirTracer->hasSeenNoTrivialPPDirective();
+}
+
+bool Preprocessor::isAtGMFIntroducerPosition() const {
+  return TrackGMFState.atGMFIntroducer() && !hasSeenNoTrivialPPDirective();
 }
 
 bool NoTrivialPPDirectiveTracer::hasSeenNoTrivialPPDirective() const {

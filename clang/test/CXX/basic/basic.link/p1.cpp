@@ -96,6 +96,8 @@ extern int a; // #a1
 int a; // #a2
 extern int b;
 module; // expected-error {{'module;' introducing a global module fragment can appear only at the start of the translation unit}}
+// expected-error@-1 {{missing 'module' declaration at end of global module fragment introduced here}}
+// expected-note@1 {{move 'module;' to the start of the file to introduce a global module fragment}}
 module :private; // #priv-frag
 // expected-error@-1 {{private module fragment declaration with no preceding module declaration}}
 int b; // ok
@@ -107,6 +109,8 @@ int a; // #a2
 extern int b;
 
 module; // expected-error {{'module;' introducing a global module fragment can appear only at the start of the translation unit}}
+// expected-error@-1 {{missing 'module' declaration at end of global module fragment introduced here}}
+// expected-note@1 {{move 'module;' to the start of the file to introduce a global module fragment}}
 int b; // ok
 
 //--- ExportFrags.cppm

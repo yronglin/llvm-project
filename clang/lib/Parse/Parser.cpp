@@ -704,6 +704,36 @@ bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result,
     Actions.ActOnEndOfTranslationUnit();
     //else don't tell Sema that we ended parsing: more input might come.
     return true;
+
+  case tok::identifier:
+    // 'module ;' is only a directive as the first preprocessing tokens of the
+    // translation unit; elsewhere the preprocessor leaves 'module' as an
+    // identifier. At the start of a top-level declaration it can only be a
+    // misplaced global module fragment introducer.
+    if (getLangOpts().CPlusPlusModules && Tok.isAtPhysicalStartOfLine() &&
+        Tok.getIdentifierInfo()->isModuleKeyword() &&
+        NextToken().is(tok::semi) && !NextToken().isAtStartOfLine()) {
+      SourceLocation StartLoc = ConsumeToken();
+      SourceLocation SemiLoc = ConsumeToken();
+      Diag(StartLoc, diag::err_global_module_introducer_not_at_start)
+          << SourceRange(StartLoc, SemiLoc);
+
+      // Before any module declaration, suggest moving it to the start of the
+      // file and recover as if it introduced the global module fragment.
+      if ((ImportState == Sema::ModuleImportState::FirstDecl ||
+           ImportState == Sema::ModuleImportState::NotACXX20Module) &&
+          !Actions.getCurrentModule()) {
+        SourceLocation BeginLoc = PP.getMainFileFirstPPTokenLoc();
+        Diag(BeginLoc, diag::note_global_module_introducer_move)
+            << FixItHint::CreateInsertion(BeginLoc, "module;\n")
+            << FixItHint::CreateRemoval(SourceRange(StartLoc, SemiLoc));
+        ImportState = Sema::ModuleImportState::GlobalFragment;
+        Actions.ActOnGlobalModuleFragmentDecl(StartLoc);
+      }
+      return false;
+    }
+    break;
+
   default:
     break;
   }

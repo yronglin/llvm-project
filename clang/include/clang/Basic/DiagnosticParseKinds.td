@@ -1670,6 +1670,9 @@ def note_module_declared_here : Note<
 def err_global_module_introducer_not_at_start : Error<
   "'module;' introducing a global module fragment can appear only "
   "at the start of the translation unit">;
+def note_global_module_introducer_move : Note<
+  "move 'module;' to the start of the file to introduce a global module "
+  "fragment">;
 def err_module_fragment_exported : Error<
   "%select{global|private}0 module fragment cannot be exported">;
 def err_private_module_fragment_expected_semi : Error<
